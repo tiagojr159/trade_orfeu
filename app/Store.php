@@ -9,10 +9,32 @@ use RuntimeException;
 final class Store
 {
     public $db;
+    private $reconstructionCutoff = null;
+    public const EOD_RECONSTRUCTION = 'DAILY_ARCHIVE_NEXT_OPEN_V1';
 
     public function __construct(PDO $db)
     {
         $this->db = $db;
+    }
+
+    public function reconstructedReplay(string $cutoff): self
+    {
+        try {
+            $this->db->query('SELECT bar_id FROM orf_reconstructed_eod LIMIT 0');
+        } catch (\PDOException $error) {
+            if ((string) $error->getCode() === '42S02') {
+                throw new RuntimeException('BLOCKED_RECONSTRUCTION_MIGRATION',0,$error);
+            }
+            throw $error;
+        }
+        $research = clone $this;
+        $research->reconstructionCutoff = $cutoff;
+        return $research;
+    }
+
+    public function usesReconstructedEod(): bool
+    {
+        return $this->reconstructionCutoff !== null;
     }
 
     public function migrate(bool $dry): array
@@ -63,9 +85,117 @@ final class Store
         return new Calendar($this->db->query('SELECT * FROM orf_session ORDER BY session_date')->fetchAll());
     }
 
-    public function importCalendar(array $rows): int
+    public function fixedWatchlist(string $at): array
     {
-        return transaction($this->db, function () use ($rows): int {
+        $fixed = require ROOT . '/config/fixed-universe.php';
+        $verified = query($this->db, 'SELECT symbol,instrument_id FROM orf_fixed_watchlist
+            WHERE version=? AND identity_verified_at<=?', [$fixed['version'],$at])->fetchAll(PDO::FETCH_KEY_PAIR);
+        $members = [];
+        foreach ($fixed['members'] as $symbol => $name) {
+            $members[$symbol] = ['symbol'=>$symbol,'name'=>$name,'instrument_id'=>$verified[$symbol] ?? null,
+                'mandatory'=>in_array($symbol,$fixed['mandatory_symbols'],true)];
+        }
+        return $members;
+    }
+
+    public function seedFixedWatchlist(string $at, bool $dry): array
+    {
+        $fixed = require ROOT . '/config/fixed-universe.php';
+        $symbols = array_keys($fixed['members']);
+        if (!$dry) {
+            transaction($this->db, function () use ($symbols,$fixed,$at): void {
+                foreach ($symbols as $index => $symbol) {
+                    query($this->db, 'INSERT INTO orf_fixed_watchlist(version,symbol,position_no,created_at)
+                        VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE symbol=symbol', [$fixed['version'],$symbol,$index+1,$at]);
+                }
+                $actual = query($this->db, 'SELECT symbol FROM orf_fixed_watchlist WHERE version=? ORDER BY position_no',
+                    [$fixed['version']])->fetchAll(PDO::FETCH_COLUMN);
+                if ($actual !== $symbols) {
+                    throw new RuntimeException('FIXED_WATCHLIST_CONFLICT');
+                }
+            });
+        }
+        return ['version'=>$fixed['version'],'symbols'=>$symbols,'dry_run'=>$dry];
+    }
+
+    public function fixedCoverage(string $from, string $to, string $at): array
+    {
+        if ($from > $to || $to > Calendar::brazilDate($at) ||
+            (new \DateTimeImmutable($from))->diff(new \DateTimeImmutable($to))->days > 7305) {
+            throw new RuntimeException('INVALID_COVERAGE_RANGE');
+        }
+        $fixed = require ROOT . '/config/fixed-universe.php';
+        $watchlistExists = $this->db->query("SHOW TABLES LIKE 'orf_fixed_watchlist'")->fetchColumn() === 'orf_fixed_watchlist';
+        $verified = $watchlistExists ? $this->fixedWatchlist($at) : [];
+        $catalog = array_column($this->instruments($to,$at),null,'symbol');
+        $calendar = $this->calendar();
+        $sessions = [];
+        $missingDays = [];
+        for ($date = new \DateTimeImmutable($from); $date->format('Y-m-d') <= $to; $date = $date->modify('+1 day')) {
+            $day = $date->format('Y-m-d');
+            $row = $calendar->get($day);
+            if (!$row) {
+                $missingDays[] = $day;
+            } elseif ($row['close_at'] !== null && $row['close_at'] <= $at) {
+                $sessions[$day] = true;
+            }
+        }
+        $items = [];
+        foreach ($fixed['members'] as $symbol => $name) {
+            $instrumentId = $verified[$symbol]['instrument_id'] ?? null;
+            $observedId = $instrumentId ?? $catalog[$symbol]['id'] ?? null;
+            $rows = $observedId === null ? [] : query($this->db, 'SELECT session_date,market,
+                MIN(available_at) first_available,MAX(available_at<received_at) publication_before_receipt
+                FROM orf_bar WHERE instrument_id=? AND session_date BETWEEN ? AND ? AND available_at<=? AND received_at<=?
+                GROUP BY session_date,market ORDER BY session_date', [$observedId,$from,$to,$at,$at])->fetchAll();
+            $regular = [];
+            $fractional = [];
+            $documented = 0;
+            foreach ($rows as $row) {
+                if (!isset($sessions[$row['session_date']])) {
+                    continue;
+                }
+                if ($row['market'] === '010') {
+                    $regular[$row['session_date']] = true;
+                    $documented += (int) $row['publication_before_receipt'];
+                } elseif ($row['market'] === '020') {
+                    $fractional[$row['session_date']] = true;
+                }
+            }
+            $gaps = array_keys(array_diff_key($sessions,$regular));
+            $items[] = ['symbol'=>$symbol,'instrument_id'=>$observedId,'identity_verified'=>$instrumentId !== null,
+                'regular_sessions'=>count($regular),'fractional_sessions'=>count($fractional),
+                'regular_sessions_available_before_receipt'=>$documented,
+                'known_session_coverage'=>$sessions && $observedId !== null ? count($regular)/count($sessions) : null,
+                'gap_count'=>$observedId !== null ? count($gaps) : null,
+                'first_gaps'=>$observedId !== null ? array_slice($gaps, 0, 10) : [],
+                'status'=>$instrumentId === null ? 'PENDING_IDENTITY' : ($missingDays ? 'CALENDAR_INCOMPLETE' :
+                    (!$regular ? 'NO_EOD_BARS' : ($gaps ? 'HISTORY_GAPS' : 'HISTORY_PRESENT')))];
+        }
+        return ['version'=>$fixed['version'],'from'=>$from,'to'=>$to,'completed_sessions'=>count($sessions),
+            'missing_calendar_days'=>count($missingDays),'first_missing_days'=>array_slice($missingDays, 0, 10),
+            'watchlist_schema_ready'=>$watchlistExists,'items'=>$items];
+    }
+
+    public function verifyFixedIdentity(string $symbol, int $id, string $evidence, string $at): void
+    {
+        $fixed = require ROOT . '/config/fixed-universe.php';
+        $instrument = $this->instruments(Calendar::brazilDate($at),$at)[$id] ?? null;
+        if (!isset($fixed['members'][$symbol]) || ($instrument['symbol'] ?? null) !== $symbol ||
+            trim($evidence) === '' || strlen($evidence) > 255) {
+            throw new RuntimeException('INVALID_WATCHLIST_IDENTITY');
+        }
+        $updated = query($this->db, 'UPDATE orf_fixed_watchlist SET instrument_id=?,identity_verified_at=?,evidence_ref=?
+            WHERE version=? AND symbol=? AND instrument_id IS NULL',
+            [$id,$at,$evidence,$fixed['version'],$symbol])->rowCount();
+        if (!$updated) {
+            throw new RuntimeException('WATCHLIST_UNSEEDED_OR_IDENTITY_ALREADY_VERIFIED');
+        }
+    }
+
+    public function importCalendar(array $rows, bool $dry = false): int
+    {
+        return transaction($this->db, function () use ($rows,$dry): int {
             foreach ($rows as $row) {
                 $old = query($this->db, 'SELECT * FROM orf_session WHERE session_date=? FOR UPDATE',
                     [$row['session_date']])->fetch();
@@ -77,7 +207,9 @@ final class Store
                     }
                     continue;
                 }
-                query($this->db, 'INSERT INTO orf_session VALUES(?,?,?,?,?,?)', array_values($row));
+                if (!$dry) {
+                    query($this->db, 'INSERT INTO orf_session VALUES(?,?,?,?,?,?)', array_values($row));
+                }
             }
             return count($rows);
         });
@@ -226,6 +358,9 @@ final class Store
 
     public function bars(int $id, string $asOf, string $date, string $market = '010'): array
     {
+        if ($this->usesReconstructedEod()) {
+            return $this->reconstructedBars($asOf,$date,$id,$market);
+        }
         return query($this->db, 'SELECT b.* FROM orf_bar b WHERE b.instrument_id=? AND b.market=?
             AND b.session_date<=? AND b.available_at<=? AND NOT EXISTS
             (SELECT 1 FROM orf_bar n WHERE n.instrument_id=b.instrument_id AND n.market=b.market
@@ -236,8 +371,9 @@ final class Store
 
     public function daily(string $date, string $asOf): array
     {
-        $rows = query($this->db, 'SELECT * FROM orf_bar WHERE session_date=? AND available_at<=?
-            ORDER BY available_at,id', [$date, $asOf])->fetchAll();
+        $rows = $this->usesReconstructedEod() ? $this->reconstructedBars($asOf,$date) :
+            query($this->db, 'SELECT * FROM orf_bar WHERE session_date=? AND available_at<=?
+                ORDER BY available_at,id', [$date, $asOf])->fetchAll();
         $out = [];
         foreach ($rows as $row) {
             $out[$row['instrument_id']][$row['market']] = $row;
@@ -245,12 +381,65 @@ final class Store
         return $out;
     }
 
-    public function importCotahist(string $file, string $from, string $received, ?string $availabilityFile = null): array
+    private function reconstructedBars(string $asOf, string $date, ?int $id = null, string $market = '010'): array
+    {
+        $effective = 'CASE WHEN h.assumed_at IS NOT NULL AND b.available_at>? THEN h.assumed_at ELSE b.available_at END';
+        $filter = $id === null ? 'b.session_date=?' : 'b.instrument_id=? AND b.market=? AND b.session_date<=?';
+        $params = array_merge([$asOf,$this->reconstructionCutoff,$this->reconstructionCutoff],
+            $id === null ? [$date] : [$id,$market,$date], [$asOf,$asOf]);
+        $rows = query($this->db, "SELECT visible.* FROM (
+            SELECT b.*,h.archive_sha256 AS reconstruction_archive,$effective AS research_available_at,
+                ROW_NUMBER() OVER (PARTITION BY b.instrument_id,b.market,b.session_date
+                    ORDER BY CASE WHEN b.available_at<=? THEN 0 ELSE 1 END, b.available_at DESC,b.id DESC) AS vintage_rank
+            FROM orf_bar b LEFT JOIN orf_reconstructed_eod h ON h.bar_id=b.id AND h.approved_at<=?
+            WHERE b.received_at<=? AND $filter AND (b.available_at<=? OR h.assumed_at<=?)
+        ) visible WHERE vintage_rank=1 ORDER BY session_date DESC,instrument_id,market" . ($id === null ? '' : ' LIMIT 61'),
+            array_merge([$asOf],$params))->fetchAll();
+        foreach ($rows as &$row) {
+            $row['recorded_available_at'] = $row['available_at'];
+            $row['available_at'] = $row['research_available_at'];
+            $row['availability_evidence'] = $row['available_at'] === $row['recorded_available_at']
+                ? 'AS_RECORDED' : 'RECONSTRUCTED_EOD';
+            unset($row['research_available_at'],$row['vintage_rank']);
+        }
+        unset($row);
+        return $rows;
+    }
+
+    public function importCotahist(string $file, string $from, string $received, ?string $availabilityFile = null,
+        bool $dry = false, ?array $reconstruction = null): array
+    {
+        $work = function () use ($file,$from,$received,$availabilityFile,$dry,$reconstruction): array {
+            return $this->loadCotahist($file,$from,$received,$availabilityFile,$dry,$reconstruction);
+        };
+        return $dry ? $work() : transaction($this->db, $work);
+    }
+
+    private function loadCotahist(string $file, string $from, string $received, ?string $availabilityFile, bool $dry,
+        ?array $reconstruction): array
     {
         $calendar = $this->calendar();
         $hash = hash_file('sha256', $file);
         if (!$hash) {
             throw new RuntimeException('COTAHIST_UNAVAILABLE');
+        }
+        $assumedAt = null;
+        if ($reconstruction !== null) {
+            $reference = trim($reconstruction['reference']);
+            $reconstructionDate = day($reconstruction['session']);
+            $session = $calendar->get($reconstructionDate);
+            $next = $calendar->next($reconstructionDate);
+            if ($availabilityFile !== null || $reference === '' || strlen($reference) > 255 ||
+                !hash_equals($hash,$reconstruction['sha256']) || !$session || !$session['close_at'] || !$next) {
+                throw new RuntimeException('INVALID_RECONSTRUCTION_EVIDENCE');
+            }
+            $assumedAt = utc($next['open_at'] . ' -5 minutes');
+            if ($assumedAt <= $session['close_at'] || $assumedAt >= $received) {
+                throw new RuntimeException('INVALID_RECONSTRUCTION_WINDOW');
+            }
+            if (!$dry) {
+                $this->reconstructedReplay($received);
+            }
         }
         $publication = [];
         if ($availabilityFile !== null) {
@@ -266,22 +455,29 @@ final class Store
                 $publication[$ref] = [$available,$entry['source_reference']];
             }
         }
-        $counts = ['inserted' => 0, 'rejected' => 0, 'unmatched' => 0, 'skipped' => 0];
+        $counts = ['matched' => 0, 'documented_rows' => 0, 'received_only_rows' => 0, 'inserted' => 0,
+            'rejected' => 0, 'unmatched' => 0, 'calendar_missing' => 0, 'market_closed' => 0, 'skipped' => 0];
         $date = null;
         $catalog = [];
         $batch = [];
-        $flush = function () use (&$batch, &$counts): void {
-            transaction($this->db, function () use (&$batch, &$counts): void {
+        $flush = function () use (&$batch,&$counts,$dry,$assumedAt,$hash,$reconstruction,$received): void {
+            if (!$dry) {
                 foreach ($batch as $record) {
                     $counts['inserted'] += query($this->db, 'INSERT INTO orf_bar
                         (instrument_id,session_date,market,open_at,close_at,available_at,received_at,
                         open_px,high_px,low_px,close_px,volume,financial_volume,raw_hash,provider)
                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE id=id', $record)->rowCount();
+                    if ($assumedAt !== null) {
+                        $this->approveReconstruction($record,$assumedAt,$received,$hash,$reconstruction['reference']);
+                    }
                 }
-            });
+            }
             $batch = [];
         };
-        foreach (Cotahist::lines($file) as $line) {
+        foreach (Cotahist::marketRecords(Cotahist::lines($file)) as $line) {
+            if ($assumedAt !== null && substr($line,2,8) !== str_replace('-','',$reconstructionDate)) {
+                throw new RuntimeException('RECONSTRUCTION_REQUIRES_DAILY_ARCHIVE');
+            }
             try {
                 $row = Cotahist::parse($line);
             } catch (RuntimeException $e) {
@@ -298,6 +494,10 @@ final class Store
                 $catalog = $session && $session['close_at']
                     ? array_column($this->instruments($date, $received), null, 'isin') : [];
             }
+            if (!$session || !$session['close_at']) {
+                $counts[$session ? 'market_closed' : 'calendar_missing']++;
+                continue;
+            }
             $instrument = $catalog[$row['isin']] ?? null;
             $symbolField = $row['market'] === '010' ? 'symbol' : 'odd_symbol';
             if (!$instrument || $instrument[$symbolField] !== $row['symbol']) {
@@ -310,6 +510,8 @@ final class Store
                 $counts['rejected']++;
                 continue;
             }
+            $counts['matched']++;
+            $counts[isset($publication[$date]) ? 'documented_rows' : 'received_only_rows']++;
             $batch[] = [$instrument['id'], $date, $row['market'], $row['open_at'], $row['close_at'],
                 $row['available_at'], $received, $row['open_px'], $row['high_px'], $row['low_px'], $row['close_px'],
                 $row['volume'], $row['financial_volume'], $row['raw_hash'], 'B3_COTAHIST'];
@@ -318,12 +520,47 @@ final class Store
             }
         }
         $flush();
-        query($this->db, 'INSERT INTO orf_raw_ingest VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE raw_hash=raw_hash',
-            [$hash, 'B3_COTAHIST', $received, array_sum($counts), $counts['rejected'] + $counts['unmatched']]);
-        if ($publication) {
-            saveRaw('B3_AVAILABILITY',json(['archive_sha256'=>$hash,'entries'=>$publication]));
+        if (!hash_equals($hash, (string) hash_file('sha256', $file))) {
+            throw new RuntimeException('COTAHIST_CHANGED_DURING_IMPORT');
         }
-        return $counts + ['raw_hash' => $hash, 'historical_availability' => $publication ? 'DOCUMENTED_PUBLICATION' : 'RECEIVED_AT_ONLY'];
+        if (!$dry) {
+            $rejected = $counts['rejected'] + $counts['unmatched'] + $counts['calendar_missing'] + $counts['market_closed'];
+            query($this->db, 'INSERT INTO orf_raw_ingest VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE raw_hash=raw_hash',
+                [$hash, 'B3_COTAHIST', $received, $counts['matched'] + $counts['skipped'] + $rejected, $rejected]);
+            if ($publication) {
+                saveRaw('B3_AVAILABILITY',json(['archive_sha256'=>$hash,'entries'=>$publication]));
+            }
+        }
+        $availability = $counts['documented_rows'] ? ($counts['received_only_rows'] ? 'MIXED' : 'DOCUMENTED_PUBLICATION')
+            : 'RECEIVED_AT_ONLY';
+        return $counts + ['dry_run'=>$dry,'raw_hash'=>$hash,'historical_availability'=>$availability,
+            'reconstruction_policy'=>$assumedAt === null ? null : self::EOD_RECONSTRUCTION,'assumed_at'=>$assumedAt];
+    }
+
+    private function approveReconstruction(array $record, string $assumedAt, string $approvedAt, string $hash,
+        string $reference): void
+    {
+        [$id,$date,$market] = $record;
+        $bar = query($this->db, 'SELECT id,available_at,received_at FROM orf_bar WHERE instrument_id=?
+            AND session_date=? AND market=? AND raw_hash=?', [$id,$date,$market,$record[13]])->fetch();
+        if (!$bar || $bar['available_at'] !== $bar['received_at'] || $bar['available_at'] <= $assumedAt) {
+            return;
+        }
+        $old = query($this->db, 'SELECT bar_id,assumed_at,archive_sha256 FROM orf_reconstructed_eod
+            WHERE instrument_id=? AND session_date=? AND market=?', [$id,$date,$market])->fetch();
+        if ($old) {
+            if ((string) $old['bar_id'] !== (string) $bar['id'] || $old['assumed_at'] !== $assumedAt ||
+                $old['archive_sha256'] !== $hash) {
+                throw new RuntimeException('RECONSTRUCTION_VINTAGE_CONFLICT');
+            }
+            return;
+        }
+        if (query($this->db,'SELECT 1 FROM orf_bar WHERE instrument_id=? AND session_date=? AND market=?
+            AND id<>? AND received_at<=? LIMIT 1',[$id,$date,$market,$bar['id'],$bar['received_at']])->fetchColumn()) {
+            throw new RuntimeException('RECONSTRUCTION_VINTAGE_CONFLICT');
+        }
+        query($this->db, 'INSERT INTO orf_reconstructed_eod VALUES (?,?,?,?,?,?,?,?,?)',
+            [$bar['id'],$id,$date,$market,$assumedAt,$approvedAt,$hash,$reference,self::EOD_RECONSTRUCTION]);
     }
 
     public function observation(string $kind, string $subject, string $ref, string $available,
@@ -338,8 +575,14 @@ final class Store
 
     public function observations(string $kind, string $date, string $asOf): array
     {
+        $args = [$kind,$date,$asOf];
+        $cutoff = '';
+        if ($this->usesReconstructedEod()) {
+            $cutoff = ' AND received_at<=?';
+            $args[] = $this->reconstructionCutoff;
+        }
         $rows = query($this->db, 'SELECT subject,ref_date,available_at,payload FROM orf_observation
-            WHERE kind=? AND ref_date<=? AND available_at<=? ORDER BY available_at,id', [$kind, $date, $asOf])->fetchAll();
+            WHERE kind=? AND ref_date<=? AND available_at<=?' . $cutoff . ' ORDER BY available_at,id', $args)->fetchAll();
         $out = [];
         foreach ($rows as $row) {
             $out[$row['subject']][$row['ref_date']] = json_decode($row['payload'], true, 64, JSON_THROW_ON_ERROR)
@@ -415,30 +658,6 @@ final class Store
         $totals = query($this->db, 'SELECT SUM(cash_delta) cash, SUM(reserve_delta) reserved,
             SUM(payable_delta) payable, SUM(receivable_delta) receivable, SUM(position_cost_delta) cost,
             SUM(pnl_delta) realized FROM orf_ledger_entry WHERE account_id=?', [$id])->fetch();
-        foreach ($totals as $key => $amount) {
-            if ($amount === null || (int) $amount !== $state[$key]) {
-                return false;
-            }
-        }
-        $payable = $receivable = $reserved = $cost = 0;
-        foreach ($state['obligations'] as $item) {
-            if ($item['side'] === 'BUY') {
-                $payable += $item['amount'];
-            } else {
-                $receivable += $item['amount'];
-            }
-        }
-        foreach ($state['pending'] as $item) {
-            $reserved += $item['budget'];
-        }
-        foreach ($state['positions'] as $item) {
-            if ($item['quantity'] < 1) {
-                return false;
-            }
-            $cost += $item['cost'];
-        }
-        return $payable === $state['payable'] && $receivable === $state['receivable'] &&
-            $reserved === $state['reserved'] && $cost === $state['cost'] &&
-            $state['cash'] >= $reserved + $payable;
+        return PaperAccount::matchesLedger($totals,$state);
     }
 }

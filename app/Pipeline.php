@@ -29,15 +29,12 @@ final class Pipeline
             if ($health && $health['next_attempt'] > $asOf || $count >= max(1, (int) $this->config->get('BRAPI_MAX_PER_DAY', '100'))) {
                 return ['status' => 'SKIPPED_NOT_DUE_OR_QUOTA'];
             }
-            $instruments = $this->store->instruments($today, $asOf);
-            $out = array_column(array_filter($instruments, static function (array $row): bool {
-                return in_array($row['status'], ['ACTIVE', 'MONITOR_ONLY'], true);
-            }), 'symbol');
-            $seed = require ROOT . '/config/seeds.php';
+            $fixed = require ROOT . '/config/fixed-universe.php';
+            $seed = $fixed['members'];
             if ($token === '' || $sandbox) {
                 $out = array_values(array_intersect(array_keys($seed), ['PETR4', 'ITUB4', 'VALE3']));
             } else {
-                $out = array_values(array_unique(array_merge(array_keys($seed), $out)));
+                $out = array_keys($seed);
             }
             // One batch per job, rotating the licensed list when larger than ten.
             $batches = array_chunk($out, $token === '' || $sandbox ? 1 : 10);
@@ -85,9 +82,11 @@ final class Pipeline
         });
     }
 
-    public function bcb(int $series, string $from, string $to, string $at): array
+    public function bcb(int $series, string $from, string $to, string $at, bool $dry = false): array
     {
-        if (!in_array($series, [11,12,433], true) || day($from) > day($to) || $to > Calendar::brazilDate($at) ||
+        $map = [1=>['USD_BRL','BRL_PER_USD'],11=>['SELIC','PERCENT_DAY'],
+            12=>['CDI','PERCENT_DAY'],433=>['IPCA','PERCENT_MONTH']];
+        if (!isset($map[$series]) || day($from) > day($to) || $to > Calendar::brazilDate($at) ||
             (new \DateTimeImmutable($from))->diff(new \DateTimeImmutable($to))->days > 3650) {
             throw new RuntimeException('INVALID_BCB_RANGE');
         }
@@ -101,33 +100,59 @@ final class Pipeline
         if (!is_array($data) || array_values($data) !== $data) {
             throw new RuntimeException('INVALID_BCB_SCHEMA');
         }
+        [$subject,$unit] = $map[$series];
+        $values = [];
+        foreach ($data as $row) {
+            if (!preg_match('~^(\d\d)/(\d\d)/(\d{4})$~D', $row['data'] ?? '', $m) ||
+                !is_numeric($row['valor'] ?? null) || !is_finite((float) $row['valor']) ||
+                ($series === 1 && $row['valor'] <= 0)) {
+                throw new RuntimeException('INVALID_BCB_SCHEMA');
+            }
+            $date = day("$m[3]-$m[2]-$m[1]");
+            if ($date < $from || $date > $to || isset($values[$date])) {
+                throw new RuntimeException('INVALID_BCB_OBSERVATION_DATE');
+            }
+            $values[$date] = (float) $row['valor'];
+        }
+        if ($dry) {
+            return ['observations'=>count($values),'subject'=>$subject,'unit'=>$unit,'dry_run'=>true];
+        }
         $hash = saveRaw('BCB_SGS', $raw);
-        return transaction($this->store->db, function () use ($data,$series,$at,$hash): array {
-            $map = [11 => 'SELIC', 12 => 'CDI', 433 => 'IPCA'];
+        return transaction($this->store->db, function () use ($values,$series,$at,$hash,$subject,$unit): array {
             $same = query($this->store->db, 'SELECT 1 FROM orf_raw_ingest WHERE raw_hash=?', [$hash])->fetchColumn();
             if ($same) {
                 return ['observations' => 0, 'status' => 'ALREADY_IMPORTED'];
             }
-            foreach ($data as $row) {
-                if (!preg_match('~^(\d\d)/(\d\d)/(\d{4})$~D', $row['data'] ?? '', $m) ||
-                    !is_numeric($row['valor'] ?? null) || !is_finite((float) $row['valor'])) {
-                    throw new RuntimeException('INVALID_BCB_SCHEMA');
+            $inserted = 0;
+            foreach ($values as $date => $value) {
+                $latest = query($this->store->db,'SELECT payload FROM orf_observation WHERE kind=? AND subject=?
+                    AND ref_date=? AND source=? ORDER BY available_at DESC,id DESC LIMIT 1',
+                    ['MACRO',$subject,$date,'BCB_SGS'])->fetchColumn();
+                if ($latest && (float) (json_decode($latest,true)['value'] ?? NAN) === $value) {
+                    continue;
                 }
-                $this->store->observation('MACRO', $map[$series], "$m[3]-$m[2]-$m[1]", $at, 'BCB_SGS',
-                    ['value' => (float) $row['valor'], 'unit' => $series === 433 ? 'PERCENT_MONTH' : 'PERCENT_DAY',
+                $this->store->observation('MACRO', $subject, $date, $at, 'BCB_SGS',
+                    ['value' => $value, 'unit' => $unit,
                         'series' => $series, 'availability' => 'RECEIVED_AT_ONLY'], $at);
+                $inserted++;
             }
-            query($this->store->db, 'INSERT INTO orf_raw_ingest VALUES (?,?,?,?,?)', [$hash,'BCB_SGS',$at,count($data),0]);
-            return ['observations' => count($data), 'status' => 'AVAILABLE'];
+            query($this->store->db, 'INSERT INTO orf_raw_ingest VALUES (?,?,?,?,?)', [$hash,'BCB_SGS',$at,count($values),0]);
+            return ['observations' => $inserted, 'status' => 'AVAILABLE'];
         });
     }
 
     public function rank(array $session, Calendar $calendar, string $asOf, bool $persist = true, ?array $prior = null,
-        bool $featuresOnly = false): array
+        bool $featuresOnly = false, bool $tournament = false, ?string $researchModel = null,
+        int $costMultiplier = 1): array
     {
+        if ($persist && $this->store->usesReconstructedEod()) {
+            throw new RuntimeException('RECONSTRUCTION_RESEARCH_ONLY');
+        }
         $db = $this->store->db;
         $date = $session['session_date'];
         $instruments = $this->store->instruments($date, $asOf);
+        $fixed = require ROOT . '/config/fixed-universe.php';
+        $verified = $tournament ? array_column($this->store->fixedWatchlist($asOf), 'instrument_id', 'symbol') : [];
         $fundamentals = $this->store->fundamentalQuality($instruments, $date, $asOf);
         $models = [];
         $artifactRows = $featuresOnly ? [] : query($db, 'SELECT m.*,p.effective_at promoted_at FROM orf_model_version m
@@ -136,6 +161,9 @@ final class Pipeline
             WHERE m.trained_until<? AND m.effective_at<=?
             ORDER BY p.effective_at IS NULL,m.effective_at DESC,m.id DESC', [$asOf,$asOf,$asOf])->fetchAll();
         foreach ($artifactRows as $artifact) {
+            if ($researchModel !== null && $artifact['id'] !== $researchModel) {
+                continue;
+            }
             if (!isset($models[$artifact['horizon']])) {
                 $m = json_decode($artifact['payload'], true, 64, JSON_THROW_ON_ERROR);
                 Model::check($m);
@@ -148,6 +176,21 @@ final class Pipeline
         $cdiValue = $cdi ? reset($cdi) : null;
         $cdiFresh = $cdi && key($cdi) >= ($calendar->previous($date)['session_date'] ?? $date);
         $coverage = $this->store->observations('ACTION_COVERAGE', $date, $asOf);
+        $earnings = $dividends = $fx = $payments = $eventDates = [];
+        if ($tournament) {
+            $earnings = $this->store->observations('EARNINGS_RELEASE',$date,$asOf);
+            $dividends = $this->store->observations('DIVIDEND_PROFILE',$date,$asOf);
+            $fx = $this->store->observations('MACRO',$date,$asOf)['USD_BRL'] ?? [];
+            foreach ($this->store->observations('CORPORATE_ACTION',$date,$asOf) as $event => $versions) {
+                ksort($versions);
+                $latest = end($versions);
+                $eventId = (int) ($latest['instrument_id'] ?? 0);
+                $eventDates[$eventId][] = array_key_last($versions);
+                if (($latest['type'] ?? '') === 'DIVIDEND') {
+                    $payments[$eventId][$event] = $latest;
+                }
+            }
+        }
         $rows = [];
         $relative = [];
         $first = $calendar->previous($date);
@@ -155,6 +198,9 @@ final class Pipeline
             $first = $calendar->previous($first['session_date']);
         }
         foreach ($instruments as $id => $instrument) {
+            if ($tournament && (string) ($verified[$instrument['symbol']] ?? '') !== (string) $id) {
+                continue;
+            }
             $row = $instrument;
             $reason = 'INELIGIBLE_' . $instrument['status'];
             $bars = $this->store->bars((int) $id, $asOf, $date);
@@ -185,8 +231,9 @@ final class Pipeline
                         [$id,$asOf,$hash,$featureJson]);
                 }
                 $row += $feature;
-                $cost = PaperAccount::POLICY['odd_penalty_bps'] / 10000 * 2 + PaperAccount::POLICY['fee_bps'] / 10000 * 2
-                    + 2 / $feature['price'];
+                $cost = (PaperAccount::POLICY['odd_penalty_bps'] + PaperAccount::POLICY['fee_bps']) / 10000 * 2;
+                $baseCost = $cost + 2 / $feature['price'];
+                $cost = $cost * $costMultiplier + 2 / $feature['price'];
                 $carry = $cdiFresh ? max(0, (1 + $cdiValue['value'] / 100) ** 5 - 1) : null;
                 $modelUsable = false;
                 foreach ($models as $horizon => $artifact) {
@@ -203,21 +250,54 @@ final class Pipeline
                     if ($horizon === '5D') {
                         $actionCoverage = $coverage[$id][$date] ?? [];
                         $row += $prediction + ['roundtrip_cost' => $cost, 'carry_cost' => $carry,
-                            'promoted' => $artifact['promoted_at'] !== null &&
+                            'promoted' => ($artifact['promoted_at'] !== null ||
+                                (!$persist && !$tournament && $researchModel === $artifact['id'])) &&
                                 ($actionCoverage['verified'] ?? false) === true && $actionCoverage['start'] <= $first['session_date'] &&
-                                abs($prediction['model_cost'] - $cost) <= .001];
+                                abs($prediction['model_cost'] - $baseCost) <= .001];
                         $modelUsable = true;
-                    } elseif ($carry !== null) {
+                    } elseif ($carry !== null && (!$tournament || $artifact['promoted_at'] !== null)) {
                         $row['edge' . (int) $horizon] = $prediction['mu_gross'] - $cost - $carry * ((int) $horizon / 5);
                     }
                 }
                 if (eligible($instrument)) {
                     $min = cents($this->config->get('UNIVERSE_MIN_ADV_BRL', '5000000'));
-                    $reason = $feature['session_date'] !== $date ? 'STALE_BAR' :
+                    $reason = $tournament && $feature['price'] < $fixed['min_price_cents'] ? 'PRICE_BELOW_MINIMUM' :
+                        ($feature['session_date'] !== $date ? 'STALE_BAR' :
                         ($feature['adv_cents'] < $min ? 'LOW_LIQUIDITY' :
-                        (!$modelUsable ? 'MISSING_MODEL_OR_FEATURES' : ($carry === null ? 'CDI_MISSING' : 'OK')));
+                        (!$modelUsable ? 'MISSING_MODEL_OR_FEATURES' : ($carry === null ? 'CDI_MISSING' : 'OK'))));
                     if ($reason === 'OK' && isset($row['relative'])) {
                         $relative[$id] = $row['relative'];
+                    }
+                    if ($tournament) {
+                        $actionCoverage = $coverage[$id][$date] ?? [];
+                        $row['minimum_adv_cents'] = $min;
+                        $row['action_coverage_ok'] = ($actionCoverage['verified'] ?? false) === true &&
+                            ($actionCoverage['start'] ?? '9999-12-31') <= $first['session_date'];
+                        $row['rule_ready'] = $feature['session_date'] === $date &&
+                            $feature['adv_cents'] >= $min && $feature['price'] >= $fixed['min_price_cents'] &&
+                            $feature['atr'] > $cost && $row['action_coverage_ok'];
+                        if ($row['rule_ready'] && isset($row['relative'])) {
+                            $relative[$id] = $row['relative'];
+                        }
+                        if ($row['rule_ready']) {
+                            $events = $eventDates[$id] ?? [];
+                            $clean = static function (string $since) use ($events): bool {
+                                foreach ($events as $event) {
+                                    if ($event >= $since) {
+                                        return false;
+                                    }
+                                }
+                                return true;
+                            };
+                            if ($clean($bars[5]['session_date'])) {
+                                $row['earnings_evidence'] = StrategyEvidence::earnings($earnings[$id] ?? [],$bars,$cost);
+                            }
+                            $row['dividend_quality'] = StrategyEvidence::dividends($dividends[$id] ?? [],$payments[$id] ?? [],$date);
+                            if ($clean($first['session_date'])) {
+                                $row['macro_return'] = StrategyEvidence::macro($bars,$fx);
+                                $row['macro_cost'] = $cost;
+                            }
+                        }
                     }
                 }
             } elseif (eligible($instrument)) {
@@ -231,7 +311,18 @@ final class Pipeline
             $rows[$id]['relative_rank'] = ++$index / count($relative);
         }
         $prior = $prior ?? $this->effectiveUniverse($asOf);
-        return Ranking::select($rows, array_filter($prior, static function ($row): bool { return $row['rank'] !== null; }));
+        $ranked = Ranking::select($rows, array_filter($prior, static function ($row): bool { return $row['rank'] !== null; }));
+        if ($tournament) {
+            foreach ($ranked as &$row) {
+                if (!empty($row['rule_ready']) && $row['status'] !== 'TRADABLE') {
+                    $row['status'] = 'EXPERIMENTAL_BASELINE';
+                    $row['reason'] = 'RULE_ONLY';
+                    unset($row['edge']);
+                }
+            }
+            unset($row);
+        }
+        return $ranked;
     }
 
     public function effectiveUniverse(string $at): array
@@ -246,15 +337,15 @@ final class Pipeline
         return $out;
     }
 
-    public function saveRank(array $rows, array $session, array $next, string $at): array
+    public function saveRank(array $rows, array $session, array $next, string $at, bool $fixed = false): array
     {
         $db = $this->store->db;
         $selected = array_filter($rows, static function (array $r): bool { return $r['rank'] !== null; });
-        $status = $selected ? 'MODELLED' : 'SEED_UNVALIDATED';
-        $prior = $this->effectiveUniverse($at);
+        $status = $fixed ? 'FIXED_REVIEW' : ($selected ? 'MODELLED' : 'SEED_UNVALIDATED');
+        $prior = $fixed ? [] : $this->effectiveUniverse($at);
         $firstOfWeek = substr($session['session_date'], 0, 4) !== substr($next['session_date'], 0, 4) ||
             (new \DateTimeImmutable($session['session_date']))->format('W') !== (new \DateTimeImmutable($next['session_date']))->format('W');
-        $rankHash = hash('sha256', json([$session['session_date'],$rows]));
+        $rankHash = hash('sha256', json([$status,$session['session_date'],$rows]));
         $version = query($db, 'SELECT model_version FROM orf_prediction WHERE as_of=? AND horizon="5D" LIMIT 1', [$at])->fetchColumn();
         transaction($db, static function () use ($db,$at,$next,$status,$version,$rankHash,$rows,$prior,$firstOfWeek): void {
             $effectiveStatus = $status === 'MODELLED' && $prior && !$firstOfWeek ? 'DAILY_REVIEW' : $status;
@@ -286,127 +377,199 @@ final class Pipeline
 
     public function tick(string $at, bool $dry = false): array
     {
+        $calendar = $this->store->calendar();
+        $market = $calendar->marketState($at);
+        $date = Calendar::brazilDate($at);
         if ($dry) {
-            $calendar = $this->store->calendar();
-            return ['status' => 'DRY_RUN', 'market' => $calendar->marketState($at),
-                'date' => Calendar::brazilDate($at), 'mode' => 'PAPER_TRADING'];
+            return ['status'=>'DRY_RUN','market'=>$market,'date'=>$date,'mode'=>'PAPER_TRADING'];
         }
-        return lock($this->store->db, 'pipeline', function () use ($at): array {
+        $jobs = new SessionJobs($this->store);
+        if (!$jobs->installed()) {
+            return ['status'=>'BLOCKED_SCHEDULER_MIGRATION'];
+        }
+        $sources = ['quotes'=>['status'=>'SKIPPED_NOT_DUE'],'inbox'=>['status'=>'SKIPPED_NOT_DUE']];
+        try {
+            if ($market === 'CONTINUOUS') {
+                $sources['quotes'] = $this->collect($at);
+            } elseif ($market === 'CLOSED') {
+                $sources['inbox'] = $this->importDailyInbox($at);
+            }
+        } catch (Throwable $error) {
+            $sources[$market === 'CONTINUOUS' ? 'quotes' : 'inbox'] = ['status'=>'ERROR','code'=>publicError($error)];
+        }
+        return lock($this->store->db,'pipeline',function () use ($at,$date,$jobs,$sources): array {
             $calendar = $this->store->calendar();
-            $market = $calendar->marketState($at);
-            $quote = $market === 'CONTINUOUS' ? $this->collect($at) : ['status' => 'SKIPPED_NOT_DUE'];
-            $date = Calendar::brazilDate($at);
-            $session = $calendar->get($date);
-            if (!$session) {
-                return ['status' => 'BLOCKED_CALENDAR', 'quotes' => $quote];
+            $today = $calendar->get($date);
+            if (!$today) {
+                return ['status'=>'BLOCKED_CALENDAR'] + $sources;
             }
-            $settled = $this->settleDue($calendar,$date,$at);
-            if ($market !== 'CONTINUOUS') {
-                $this->importDailyInbox($at);
+            $latest = $today['close_at'] && $today['close_at'] <= $at ? $today : $calendar->previous($date);
+            if (!$latest) {
+                return ['status'=>'WAITING_EOD','accounts_settled'=>$this->settleDue($calendar,$date,$at)] + $sources;
             }
-            if (!$session['close_at'] || $at < $session['close_at']) {
-                $previous = $calendar->previous($date);
-                if (!$previous) {
-                    return ['status' => 'WAITING_EOD', 'quotes' => $quote];
+            $processed = [];
+            $status = 'SKIPPED_NOT_DUE';
+            $session = $jobs->due($calendar,$latest,$at);
+            for ($count=0; $count<5 && $session && $session['session_date'] <= $latest['session_date']; $count++) {
+                $key = $session['session_date'];
+                $next = $calendar->next($key);
+                if (!$next) {
+                    $status = 'BLOCKED_NEXT_SESSION';
+                    break;
                 }
-                $session = $previous;
-            }
-            $next = $calendar->next($session['session_date']);
-            if (!$next) {
-                return ['status' => 'BLOCKED_NEXT_SESSION', 'quotes' => $quote];
-            }
-            $daily = $this->store->daily($session['session_date'], $at);
-            if (!$daily) {
-                return ['status' => 'BLOCKED_EOD_DATA', 'quotes' => $quote, 'session' => $session['session_date'],
-                    'accounts_settled' => $settled];
-            }
-            $db = $this->store->db;
-            if (query($db, 'SELECT 1 FROM orf_job_run WHERE job="EOD" AND detail=? AND status="SUCCESS"',
-                [$session['session_date']])->fetchColumn()) {
-                return ['status' => 'SKIPPED_NOT_DUE', 'quotes' => $quote];
-            }
-            $ranked = $this->saveRank($this->rank($session, $calendar, $at), $session, $next, $at);
-            $seasons = query($db, 'SELECT * FROM orf_season WHERE starts_at<=? ORDER BY id',
-                [$session['close_at']])->fetchAll();
-            $prices = [];
-            foreach ($daily as $id => $bars) {
-                if (isset($bars['010'])) {
-                    $prices[$id] = (int) $bars['010']['close_px'];
+                $missed = $at >= $next['open_at'];
+                $checkpoint = $jobs->checkpoint($key);
+                if (($checkpoint['status'] ?? '') === 'DEAD') {
+                    $status = 'BLOCKED_EOD_DEAD_LETTER';
+                    break;
                 }
-            }
-            $actions = $this->store->observations('CORPORATE_ACTION', $session['session_date'], $session['open_at']);
-            $instruments = $this->store->instruments($session['session_date'], $session['open_at']);
-            $settlement = $calendar->next($session['session_date'], 2, true);
-            foreach ($seasons as $season) {
-                $ids = query($db, 'SELECT id FROM orf_account WHERE season_id=? ORDER BY id',
-                    [$season['id']])->fetchAll(\PDO::FETCH_COLUMN);
-                foreach ($ids as $id) {
-                    transaction($db, function () use ($db,$id,$season,$session,$next,$daily,$actions,$ranked,$prices,
-                        $instruments,$settlement,$at): void {
-                        $row = query($db, 'SELECT * FROM orf_account WHERE id=? FOR UPDATE', [$id])->fetch();
-                        $state = json_decode($row['state'], true, 64, JSON_THROW_ON_ERROR);
-                        if ($state['last_day'] !== null && $state['last_day'] >= $session['session_date']) {
-                            return;
-                        }
-                        if (!$this->store->reconcile((int) $id, $state)) {
-                            query($db, 'INSERT INTO orf_alert(as_of,code,payload) VALUES(?,?,?)',
-                                [$at,'LEDGER_MISMATCH',json(['account_id' => $id])]);
-                            return;
-                        }
-                        $policy = json_decode($season['policy'], true, 64, JSON_THROW_ON_ERROR);
-                        $book = new PaperAccount($season['id'] . ':' . $row['strategy_key'], $policy, $state);
-                        foreach ($actions as $versions) {
-                            if (isset($versions[$session['session_date']])) {
-                                $book->corporate($versions[$session['session_date']], $session['open_at']);
-                            }
-                        }
-                        if ($session['settles']) {
-                            $book->settle($session['session_date'], $session['open_at']);
-                        }
-                        $book->execute($session, $daily, $instruments, $settlement, (bool) $season['paused']);
-                        $mark = $book->close($prices, $session['session_date']);
-                        $paused = $season['paused'] || $mark['drawdown'] <= -.10 || $mark['daily_return'] <= -.03;
-                        $candidates = $ranked;
-                        uasort($candidates, static function (array $a,array $b): int {
-                            return ($a['rank'] ?? 999) <=> ($b['rank'] ?? 999);
-                        });
-                        foreach ($candidates as $instrument => $candidate) {
-                            $hasPosition = isset($book->state['positions'][$instrument]);
-                            if ($hasPosition && $candidate['rank'] === null) {
-                                $candidate['status'] = 'EXIT_ONLY';
-                            }
-                            if (!$hasPosition && $candidate['rank'] === null) {
-                                continue;
-                            }
-                            if (!isset($prices[$instrument]) || !eligible($instruments[$instrument] ?? [])) {
-                                [$action,$reason] = ['NO_TRADE','STALE_OR_SUSPENDED'];
-                            } else {
-                                $candidate['price'] = $prices[$instrument];
-                                [$action,$reason] = $book->decide($row['strategy_key'],$candidate,$mark,$session,$next,$at,(bool) $paused);
-                            }
-                            query($db, 'INSERT INTO orf_decision VALUES (?,?,?,?,?,?)',
-                                [$id,$instrument,$at,$action,$reason,json(['edge' => $candidate['edge'] ?? null])]);
-                        }
-                        $this->store->persistAccount((int) $id, $book);
-                        $this->store->equity((int) $id, $at, $mark);
-                    });
+                $retryAt = $checkpoint['next_attempt_at'] ?? null;
+                if ($retryAt !== null && $retryAt > $at) {
+                    $status = 'WAITING_EOD';
+                    break;
                 }
+                $jobs->start($key,$at);
+                try {
+                    $snapshotAt = $missed ? utc($at . ' -' . (5-$count) . ' microseconds') : $at;
+                    $result = $this->processEodSession($calendar,$session,$next,$at,$snapshotAt,$missed);
+                } catch (Throwable $error) {
+                    $jobs->failed($key,$at,publicError($error));
+                    throw $error;
+                }
+                $status = $result['status'];
+                $terminal = in_array($status,['SUCCESS','EOD_GAP'],true);
+                transaction($this->store->db,function () use ($jobs,$key,$at,$terminal,$status): void {
+                    $jobs->finish($key,$at,$terminal ? ($status === 'EOD_GAP' ? 'GAP' : 'DONE') : 'WAITING',
+                        $status,$terminal ? null : utc($at . ' +10 minutes'));
+                    if ($terminal) {
+                        query($this->store->db,'INSERT INTO orf_job_run(job,as_of,status,detail) VALUES (?,?,?,?)',
+                            ['EOD',$at,$status,$key]);
+                    }
+                });
+                $processed[] = $result;
+                if (!$terminal) {
+                    break;
+                }
+                $session = $next;
             }
-            query($db, 'INSERT INTO orf_job_run(job,as_of,status,detail) VALUES (?,?,?,?)',
-                ['EOD',$at,'SUCCESS',$session['session_date']]);
-            return ['status' => 'SUCCESS', 'session' => $session['session_date'], 'seasons' => count($seasons),
-                'quotes' => $quote, 'accounts_settled' => $settled];
+            $caughtUp = $session && $session['session_date'] > $latest['session_date'];
+            return ['status'=>$status,'session'=>$processed ? end($processed)['session'] : null,'eod_sessions'=>$processed,
+                'accounts_settled'=>$caughtUp ? $this->settleDue($calendar,$date,$at) : 0] + $sources;
         });
     }
 
-    private function importDailyInbox(string $at): void
+    private function processEodSession(Calendar $calendar, array $session, array $next, string $at, string $snapshotAt,
+        bool $missed): array
+    {
+        $daily = $this->store->daily($session['session_date'], $at);
+        if (!$daily && !$missed) {
+            return ['status'=>'BLOCKED_EOD_DATA','session'=>$session['session_date']];
+        }
+        $db = $this->store->db;
+        $ranked = [];
+        if (!$missed) {
+            $ranked = $this->rank($session, $calendar, $at, true, null, false, true);
+            $this->saveRank($ranked, $session, $next, $at, true);
+        }
+        $openEvidence = $daily;
+        foreach ($openEvidence as &$markets) {
+            $markets = array_filter($markets,static function (array $bar) use ($missed,$next): bool {
+                return $bar['provider'] === 'B3_COTAHIST' && (!$missed || $bar['available_at'] < $next['open_at']);
+            });
+        }
+        unset($markets);
+        $seasons = query($db, 'SELECT * FROM orf_season WHERE starts_at<=? ORDER BY id',
+            [$session['close_at']])->fetchAll();
+        $prices = [];
+        foreach ($daily as $id => $bars) {
+            if (isset($bars['010'])) {
+                $prices[$id] = (int) $bars['010']['close_px'];
+            }
+        }
+        $actions = $this->store->observations('CORPORATE_ACTION', $session['session_date'], $session['open_at']);
+        $instruments = $this->store->instruments($session['session_date'], $session['open_at']);
+        $buyIds = array_column($this->store->fixedWatchlist($session['open_at']), 'instrument_id', 'symbol');
+        $settlement = $calendar->next($session['session_date'], 2, true);
+        $blockedAccounts = 0;
+        foreach ($seasons as $season) {
+            $ids = query($db, 'SELECT id FROM orf_account WHERE season_id=? ORDER BY id',
+                [$season['id']])->fetchAll(\PDO::FETCH_COLUMN);
+            foreach ($ids as $id) {
+                $ok = transaction($db, function () use ($db,$id,$season,$session,$next,$openEvidence,$actions,$ranked,$prices,
+                    $instruments,$settlement,$at,$snapshotAt,$buyIds,$missed): bool {
+                    $row = query($db, 'SELECT * FROM orf_account WHERE id=? FOR UPDATE', [$id])->fetch();
+                    $state = json_decode($row['state'], true, 64, JSON_THROW_ON_ERROR);
+                    if ($state['last_day'] !== null && $state['last_day'] >= $session['session_date']) {
+                        return true;
+                    }
+                    if (!$this->store->reconcile((int) $id, $state)) {
+                        query($db, 'INSERT INTO orf_alert(as_of,code,payload) VALUES(?,?,?)',
+                            [$at,'LEDGER_MISMATCH',json(['account_id' => $id])]);
+                        return false;
+                    }
+                    $policy = json_decode($season['policy'], true, 64, JSON_THROW_ON_ERROR);
+                    $book = new PaperAccount($season['id'] . ':' . $row['strategy_key'], $policy, $state);
+                    foreach ($actions as $versions) {
+                        if (isset($versions[$session['session_date']])) {
+                            $book->corporate($versions[$session['session_date']], $session['open_at']);
+                        }
+                    }
+                    if ($session['settles']) {
+                        $book->settle($session['session_date'], $session['open_at']);
+                    }
+                    $book->execute($session, $openEvidence, $instruments, $settlement, (bool) $season['paused'], $buyIds,$at,$missed);
+                    $mark = $book->close($prices, $session['session_date'],$at);
+                    $paused = $season['paused'] || $mark['drawdown'] <= -.10 || $mark['daily_return'] <= -.03;
+                    $candidates = $ranked;
+                    foreach ($book->state['positions'] as $instrument => $position) {
+                        if (isset($instruments[$instrument]) && !isset($candidates[$instrument])) {
+                            $candidates[$instrument] = array_replace($instruments[$instrument],
+                                ['rank'=>null,'status'=>'EXIT_ONLY']);
+                        }
+                    }
+                    if ($missed) {
+                        $candidates = [];
+                    }
+                    uasort($candidates, static function (array $a,array $b) use ($book): int {
+                        return [!isset($book->state['positions'][$a['id']]),$a['rank'] ?? 999,$a['id']] <=>
+                            [!isset($book->state['positions'][$b['id']]),$b['rank'] ?? 999,$b['id']];
+                    });
+                    foreach ($candidates as $instrument => $candidate) {
+                        if (!isset($prices[$instrument]) || !eligible($instruments[$instrument] ?? [])) {
+                            [$action,$reason] = ['NO_TRADE','STALE_OR_SUSPENDED'];
+                        } else {
+                            $candidate['price'] = $prices[$instrument];
+                            [$action,$reason] = $book->decide($row['strategy_key'],$candidate,$mark,$session,$next,$at,(bool) $paused);
+                        }
+                        query($db, 'INSERT INTO orf_decision VALUES (?,?,?,?,?,?)',
+                            [$id,$instrument,$at,$action,$reason,json(['edge'=>$candidate['edge'] ?? null,
+                                'evidence_level'=>($candidate['status'] === 'EXPERIMENTAL_BASELINE' &&
+                                    in_array($row['strategy_key'], Strategies::RULE_BASELINES, true)) ? 'RULE_ONLY' : null,
+                                'signal_variant'=>Strategies::variant($row['strategy_key'],$candidate)])]);
+                    }
+                    $this->store->persistAccount((int) $id, $book);
+                    $mark['session_date'] = $session['session_date'];
+                    $mark['late_processing'] = $missed;
+                    $mark['recorded_at'] = $at;
+                    $this->store->equity((int) $id, $snapshotAt, $mark);
+                    return true;
+                });
+                $blockedAccounts += (int) !$ok;
+            }
+        }
+        return ['status'=>$missed || $blockedAccounts ? 'EOD_GAP' : 'SUCCESS','session'=>$session['session_date'],
+            'seasons'=>count($seasons),'late_recovery'=>$missed,'blocked_accounts'=>$blockedAccounts];
+    }
+
+    private function importDailyInbox(string $at): array
     {
         $db = $this->store->db;
         $files = glob(ROOT . '/storage/inbox/COTAHIST_D*.ZIP') ?: [];
         if (!$files) {
-            return;
+            return ['status'=>'NO_FILES'];
         }
-        lock($db,'cotahist',function () use ($db,$files,$at): void {
+        return lock($db,'cotahist',function () use ($db,$files,$at): array {
+            $results = [];
             foreach ($files as $file) {
                 if (filemtime($file) > time() - 60 || !preg_match('/^COTAHIST_D\d{8}\.ZIP$/iD',basename($file))) {
                     continue;
@@ -415,11 +578,27 @@ final class Pipeline
                 if (!$hash || query($db,'SELECT 1 FROM orf_raw_ingest WHERE raw_hash=?',[$hash])->fetchColumn()) {
                     continue;
                 }
-                $result = $this->store->importCotahist($file,'2015-01-01',$at);
+                $detail = basename($file) . ':' . substr($hash,0,12);
+                $recentFailure = query($db,'SELECT 1 FROM orf_job_run WHERE job=? AND status=? AND detail=? AND as_of>?',
+                    ['COTAHIST','ERROR',$detail,utc($at . ' -1 hour')])->fetchColumn();
+                if ($recentFailure) {
+                    continue;
+                }
+                try {
+                    $result = $this->store->importCotahist($file,'2015-01-01',$at);
+                    $status = $result['inserted'] ? 'SUCCESS' : 'NO_MATCHED_ROWS';
+                    $results[] = ['file'=>basename($file),'status'=>$status];
+                } catch (Throwable $error) {
+                    $status = 'ERROR';
+                    $results[] = ['file'=>basename($file),'status'=>$status,'code'=>publicError($error)];
+                }
                 query($db,'INSERT INTO orf_job_run(job,as_of,status,detail) VALUES(?,?,?,?)',
-                    ['COTAHIST',$at,$result['inserted'] ? 'SUCCESS' : 'NO_MATCHED_ROWS',basename($file)]);
-                break;
+                    ['COTAHIST',$at,$status,$detail]);
+                if (count($results) >= 3) {
+                    break;
+                }
             }
+            return ['status'=>$results ? 'CHECKED' : 'NO_NEW_FILES','files'=>$results];
         });
     }
 

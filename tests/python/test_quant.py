@@ -1,4 +1,11 @@
 import datetime
+import importlib.util
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from orfeu_quant.data import utc, visible_revision
@@ -8,6 +15,54 @@ from orfeu_quant.splits import purged_split
 
 
 class QuantTests(unittest.TestCase):
+    def test_cli_checks_exported_snapshot_hash(self):
+        fixture = json.loads((Path(__file__).parents[1] / "fixtures" / "linear.json").read_text())
+        with TemporaryDirectory() as directory:
+            model = Path(directory) / "model.json"
+            model.write_text(json.dumps(fixture["model"]), encoding="utf-8")
+            features = Path(directory) / "features.jsonl"
+            payload = json.dumps(fixture["features"])
+            snapshot = {"instrument_id": 1, "as_of": fixture["as_of"], "payload": payload,
+                        "feature_hash": hashlib.sha256(payload.encode()).hexdigest()}
+            args = [sys.executable, "-m", "orfeu_quant.predict", "--model", str(model),
+                    "--sha256", hashlib.sha256(model.read_bytes()).hexdigest(), "--features", str(features),
+                    "--as-of", fixture["as_of"]]
+            features.write_text(json.dumps({"kind": "feature", "data": snapshot}) + "\n", encoding="utf-8")
+            result = json.loads(subprocess.run(args, check=True, capture_output=True, text=True).stdout)
+            self.assertAlmostEqual(result["prediction"]["p_up"], fixture["expected"]["p_up"], places=8)
+            snapshot["payload"] += " "
+            features.write_text(json.dumps({"kind": "feature", "data": snapshot}) + "\n", encoding="utf-8")
+            result = subprocess.run(args, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("FEATURE_HASH_MISMATCH", result.stderr)
+
+    @unittest.skipUnless(importlib.util.find_spec("lightgbm"), "optional LightGBM runtime missing")
+    def test_native_lightgbm_round_trip(self):
+        from orfeu_quant.data import COLUMNS, SCHEMA
+        from orfeu_quant.predict import load_challenger
+        from orfeu_quant.train import fit_challenger
+
+        def rows(count, offset):
+            return [{"features": [(i + offset) % 30 / 30, *[j * i / 100 for j in range(1, 9)]],
+                     "gross": ((i + offset) % 30 - 14) / 200}
+                    for i in range(count)]
+
+        test = rows(40, 7)
+        report, artifact = fit_challenger(rows(100, 0), rows(50, 3), test, .005, export=True)
+        artifact.update(schema=SCHEMA, columns=COLUMNS, cost=.005,
+                        trained_until="2026-11-17T22:00:00Z", effective_at="2026-11-18T00:00:00Z")
+        score = load_challenger(artifact)
+        features = [dict(zip(COLUMNS, row["features"], strict=True)) for row in test]
+        self.assertIsNone(score(features[0], "2026-11-17T22:00:00Z"))
+        self.assertIsNone(score({}, "2026-11-18T10:00:00Z"))
+        outcomes = [score(feature, "2026-11-18T10:00:00Z") for feature in features]
+        mae = sum(abs(pred["mu_gross"] - row["gross"]) for pred, row in zip(outcomes, test, strict=True)) / len(test)
+        brier = sum((pred["p_profitable"] - (row["gross"] > .005)) ** 2
+                    for pred, row in zip(outcomes, test, strict=True)) / len(test)
+        self.assertAlmostEqual(mae, report["return_mae"], places=10)
+        self.assertAlmostEqual(brier, report["profitable"]["brier"], places=10)
+        self.assertTrue(all(item["q10"] <= item["q50"] <= item["q90"] for item in outcomes))
+
     def test_fundamental_release_after_close_and_point_in_time(self):
         earlier = {"valid_from": "2026-01-01", "available_at": "2026-03-30T19:00:00Z", "status": "ACTIVE"}
         later = {"valid_from": "2026-01-01", "available_at": "2026-03-31T02:00:00Z", "status": "SUSPENDED"}

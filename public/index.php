@@ -32,6 +32,7 @@ try {
             $setupStore->migrate(false);
             $setupStore->importCalendar(Calendar::official2026());
             $setupStore->catalog(ROOT . '/config/seed-catalog.csv');
+            $setupStore->seedFixedWatchlist(utc(), false);
             $setupStore->season('season-001', cents($config->get('INITIAL_CAPITAL_BRL', '1000.00')), utc());
         }
     }

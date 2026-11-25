@@ -38,7 +38,8 @@ try {
     $commands = ['doctor','migrate','calendar:seed','calendar:import','universe:seed','universe:import',
         'data:backfill','data:quotes','data:bcb','data:cvm','data:observations','season:create',
         'rank:refresh','tick','reconcile','research:features','research:export','research:import','model:import','model:promote',
-        'backtest','report:daily'];
+        'backtest','report:daily','universe:seed-fixed','universe:verify-fixed','data:coverage','calendar:sync','predictions:evaluate',
+        'research:trial','research:intraday','jobs:retry-eod'];
     if ($cmd === 'help') {
         echo implode(PHP_EOL, $commands) . PHP_EOL;
         exit(0);
@@ -55,8 +56,15 @@ try {
             'local_root' => $config->get('ALLOW_LOCAL_ROOT') === 'true'];
         try {
             $db = $config->connect();
+            $tables = $db->query('SHOW FULL TABLES')->fetchAll(\PDO::FETCH_COLUMN);
+            $counts = [];
+            foreach (['orf_session','orf_bar','orf_quote','orf_prediction','orf_prediction_evaluation',
+                'orf_order','orf_fill','orf_account','orf_fixed_watchlist','orf_job_checkpoint'] as $table) {
+                $counts[$table] = in_array($table,$tables,true) ? (int) $db->query("SELECT COUNT(*) FROM $table")->fetchColumn() : null;
+            }
             $info['db'] = ['schema' => $db->query('SELECT DATABASE()')->fetchColumn(), 'version' => $db->query('SELECT VERSION()')->fetchColumn(),
-                'tables' => count($db->query('SHOW FULL TABLES')->fetchAll())];
+                'tables' => count($tables),'row_counts'=>$counts];
+            $info['market'] = in_array('orf_session',$tables,true) ? (new Store($db))->calendar()->marketState($at) : null;
         } catch (Throwable $e) {
             $info['db'] = publicError($e);
         }
@@ -67,6 +75,37 @@ try {
     $store = new Store($db);
     $pipeline = new Pipeline($store, $config);
     switch ($cmd) {
+        case 'jobs:retry-eod':
+            $sessionDate = day($options['session'] ?? '');
+            $jobs = new SessionJobs($store);
+            if (!$jobs->installed()) {
+                throw new RuntimeException('BLOCKED_SCHEDULER_MIGRATION');
+            }
+            $result = lock($db,'pipeline',static function () use ($jobs,$sessionDate,$at): array {
+                return ['status'=>$jobs->retryDead($sessionDate,$at) ? 'RETRY_QUEUED' : 'NO_DEAD_JOB','session'=>$sessionDate];
+            });
+            break;
+        case 'predictions:evaluate':
+            $limit = filter_var($options['limit'] ?? 100,FILTER_VALIDATE_INT,['options'=>['min_range'=>1,'max_range'=>1000]]);
+            if (!$limit) {
+                throw new RuntimeException('INVALID_LIMIT');
+            }
+            if (!PredictionEvaluation::installed($store)) {
+                throw new RuntimeException('BLOCKED_PREDICTION_MIGRATION');
+            }
+            $result = PredictionEvaluation::run($store,$at,$limit);
+            break;
+        case 'universe:seed-fixed':
+            $result = $store->seedFixedWatchlist($at, isset($options['dry-run']));
+            break;
+        case 'universe:verify-fixed':
+            $id = filter_var($options['instrument'] ?? '', FILTER_VALIDATE_INT, ['options'=>['min_range'=>1]]);
+            if (!$id || !is_string($options['symbol'] ?? null) || !is_string($options['evidence'] ?? null)) {
+                throw new RuntimeException('INVALID_WATCHLIST_IDENTITY');
+            }
+            $store->verifyFixedIdentity($options['symbol'], $id, $options['evidence'], $at);
+            $result = ['status'=>'VERIFIED','symbol'=>$options['symbol'],'instrument_id'=>$id];
+            break;
         case 'migrate':
             $result = $store->migrate(isset($options['dry-run']));
             break;
@@ -74,15 +113,34 @@ try {
             $result = ['sessions_and_closures' => $store->importCalendar(Calendar::official2026())];
             break;
         case 'calendar:import':
+        case 'calendar:sync':
+            $sync = $cmd === 'calendar:sync';
+            $from = $sync ? day($options['from'] ?? '') : null;
+            $to = $sync ? day($options['to'] ?? '') : null;
+            if ($sync && $from > $to) {
+                throw new RuntimeException('INVALID_CALENDAR_RANGE');
+            }
             $rows = [];
             foreach (csvRows(inputFile($options)) as $r) {
-                if (!in_array($r['settles'] ?? '', ['0','1'], true) || empty($r['source'])) {
+                if (!isset($r['session_date'],$r['open'],$r['continuous_end'],$r['close']) ||
+                    !in_array($r['settles'] ?? '', ['0','1'], true) || empty($r['source'])) {
                     throw new RuntimeException('INVALID_CALENDAR_CSV');
                 }
-                $rows[] = Calendar::row($r['session_date'],$r['open'] ?: null,$r['continuous_end'] ?: null,
+                $date = day($r['session_date']);
+                if ($sync && ($date < $from || $date > $to)) {
+                    continue;
+                }
+                if (isset($rows[$date])) {
+                    throw new RuntimeException('DUPLICATE_CALENDAR_DATE');
+                }
+                $rows[$date] = Calendar::row($date,$r['open'] ?: null,$r['continuous_end'] ?: null,
                     $r['close'] ?: null,$r['settles'] === '1',$r['source']);
             }
-            $result = ['sessions_and_closures' => $store->importCalendar($rows)];
+            if ($sync && count($rows) !== (new \DateTimeImmutable($from))->diff(new \DateTimeImmutable($to))->days + 1) {
+                throw new RuntimeException('BLOCKED_CALENDAR_RANGE');
+            }
+            $dry = isset($options['dry-run']);
+            $result = ['sessions_and_closures' => $store->importCalendar($rows,$dry),'dry_run'=>$dry];
             break;
         case 'universe:seed':
         case 'universe:import':
@@ -92,8 +150,23 @@ try {
         case 'data:backfill':
             $result = lock($db, 'cotahist', static function () use ($store,$options,$at): array {
                 $availability = isset($options['availability-file']) ? inputFile(['file'=>$options['availability-file']]) : null;
-                return $store->importCotahist(inputFile($options), day($options['from'] ?? '2015-01-01'), $at,$availability);
+                $reconstruction = null;
+                if (isset($options['reconstruct-session']) || isset($options['archive-sha256']) || isset($options['evidence-ref'])) {
+                    foreach (['reconstruct-session','archive-sha256','evidence-ref'] as $key) {
+                        if (!is_string($options[$key] ?? null)) {
+                            throw new RuntimeException('INVALID_RECONSTRUCTION_EVIDENCE');
+                        }
+                    }
+                    $reconstruction = ['session'=>$options['reconstruct-session'],'sha256'=>$options['archive-sha256'],
+                        'reference'=>$options['evidence-ref']];
+                }
+                return $store->importCotahist(inputFile($options), day($options['from'] ?? '2015-01-01'), $at,$availability,
+                    isset($options['dry-run']),$reconstruction);
             });
+            break;
+        case 'data:coverage':
+            $to = day($options['to'] ?? Calendar::brazilDate($at));
+            $result = $store->fixedCoverage(day($options['from'] ?? substr($to,0,4) . '-01-01'),$to,$at);
             break;
         case 'data:quotes':
             $result = $pipeline->collect($at, isset($options['sandbox']));
@@ -101,7 +174,7 @@ try {
         case 'data:bcb':
             $result = $pipeline->bcb((int) ($options['series'] ?? 12),
                 day($options['from'] ?? Calendar::brazilDate(utc('-15 days'))),
-                day($options['to'] ?? Calendar::brazilDate($at)), $at);
+                day($options['to'] ?? Calendar::brazilDate($at)), $at, isset($options['dry-run']));
             break;
         case 'data:cvm':
             $result = importCvm($store, inputFile($options), $at);
@@ -130,6 +203,13 @@ try {
             break;
         case 'tick':
             $result = $pipeline->tick($at, isset($options['dry-run']));
+            if (!isset($options['dry-run']) && PredictionEvaluation::installed($store)) {
+                try {
+                    $result['prediction_evaluation'] = PredictionEvaluation::run($store,$at,100);
+                } catch (Throwable $error) {
+                    $result['prediction_evaluation'] = ['status'=>'ERROR','code'=>publicError($error)];
+                }
+            }
             if (!isset($options['dry-run']) && strpos($result['status'],'BLOCKED') === 0) {
                 $recent = query($db,'SELECT 1 FROM orf_job_run WHERE job="TICK" AND status=? AND as_of>=? LIMIT 1',
                     [$result['status'],utc('-1 hour')])->fetchColumn();
@@ -160,12 +240,88 @@ try {
         case 'model:promote':
             $result = promote($store,$options['model'] ?? '',$options['evidence'] ?? '',$at);
             break;
+        case 'research:intraday':
+            foreach (['symbol','session','sha256','evidence-ref'] as $key) {
+                if (!is_string($options[$key] ?? null)) {
+                    throw new RuntimeException('INVALID_INTRADAY_EVIDENCE');
+                }
+            }
+            $reference = trim($options['evidence-ref']);
+            $symbol = $options['symbol'];
+            $date = day($options['session']);
+            $minutes = filter_var($options['minutes'] ?? 5,FILTER_VALIDATE_INT);
+            if (!$reference || strlen($reference) > 255 || !in_array($minutes,[5,15],true) ||
+                !preg_match('/^[a-f0-9]{64}$/D',$options['sha256'])) {
+                throw new RuntimeException('INVALID_INTRADAY_EVIDENCE');
+            }
+            $calendar = $store->calendar();
+            $session = $calendar->get($date);
+            $settlement = $calendar->next($date,2,true);
+            if (!$session || !$session['continuous_end'] || $session['continuous_end'] > $at || !$settlement) {
+                throw new RuntimeException('BLOCKED_INTRADAY_CALENDAR');
+            }
+            $member = $store->fixedWatchlist($session['open_at'])[$symbol] ?? [];
+            $id = $member['instrument_id'] ?? 0;
+            $instrument = $store->instruments($date,$session['open_at'])[$id] ?? [];
+            if (!eligible($instrument) || ($instrument['symbol'] ?? null) !== $symbol || empty($instrument['odd_symbol'])) {
+                throw new RuntimeException('BLOCKED_INTRADAY_IDENTITY_OR_ODD_LOT');
+            }
+            $coverage = $store->observations('ACTION_COVERAGE',$date,$session['open_at'])[$id][$date] ?? [];
+            if (($coverage['verified'] ?? false) !== true) {
+                throw new RuntimeException('BLOCKED_INTRADAY_ACTION_COVERAGE');
+            }
+            foreach ($store->observations('CORPORATE_ACTION',$date,$at) as $events) {
+                if ((string) ($events[$date]['instrument_id'] ?? '') === (string) $id) {
+                    throw new RuntimeException('BLOCKED_INTRADAY_CORPORATE_ACTION');
+                }
+            }
+            $bars = IntradayReplay::load(inputFile($options),$options['sha256'],$instrument['odd_symbol'],$instrument['isin'],
+                $session,$minutes*60,$at);
+            $result = IntradayReplay::simulate($bars,$session,$instrument,$settlement,$minutes*60) +
+                ['session'=>$date,'symbol'=>$symbol,'provider'=>$bars[0]['provider'],'minutes'=>$minutes,
+                    'archive_sha256'=>$options['sha256'],'evidence_ref'=>$reference];
+            break;
+        case 'research:trial':
+            foreach (['strategy','threshold','atr-stop','holding','as-of','from','to'] as $required) {
+                if (!is_string($options[$required] ?? null)) {
+                    throw new RuntimeException('INVALID_STRATEGY_TRIAL');
+                }
+            }
+            $holding = filter_var($options['holding'],FILTER_VALIDATE_INT);
+            $cost = filter_var($options['cost-multiplier'] ?? 1,FILTER_VALIDATE_INT);
+            $cutoff = timestamp($options['as-of']);
+            if (!$holding || !$cost || !is_numeric($options['threshold']) || !is_numeric($options['atr-stop']) ||
+                $cutoff > $at) {
+                throw new RuntimeException('INVALID_STRATEGY_TRIAL');
+            }
+            $trial = new StrategyTrial($options['strategy'],(float) $options['threshold'],(float) $options['atr-stop'],$holding);
+            $from = day($options['from']);
+            $to = day($options['to']);
+            if ($to >= Calendar::brazilDate($cutoff)) {
+                throw new RuntimeException('BLOCKED_INCOMPLETE_TRIAL_WINDOW');
+            }
+            $db->exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
+            $result = transaction($db,static function () use ($store,$pipeline,$from,$to,$cutoff,$cost,$trial): array {
+                return (new Replay($store,$pipeline))->run($from,$to,100000,$cutoff,$cost,null,true,$trial);
+            });
+            break;
         case 'backtest':
+            if (isset($options['research-model']) && !is_string($options['research-model'])) {
+                throw new RuntimeException('UNKNOWN_RESEARCH_MODEL');
+            }
+            if (isset($options['reconstructed-eod'])) {
+                if (!isset($options['fixed-rules'])) {
+                    throw new RuntimeException('RECONSTRUCTION_REQUIRES_FIXED_RULES');
+                }
+                $store = $store->reconstructedReplay($at);
+                $pipeline = new Pipeline($store,$config);
+            }
             $result = (new Replay($store,$pipeline))->run(day($options['from'] ?? ''),day($options['to'] ?? ''),
-                cents($options['capital'] ?? '1000'),$at,(int) ($options['cost-multiplier'] ?? 1));
+                cents($options['capital'] ?? '1000'),$at,(int) ($options['cost-multiplier'] ?? 1),$options['research-model'] ?? null,
+                isset($options['fixed-rules']));
             $payload = json($result);
             query($db,'INSERT INTO orf_research_run VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE id=id',
-                [hash('sha256',$payload),'BACKTEST_EOD',$at,$payload]);
+                [hash('sha256',$payload),isset($options['reconstructed-eod']) ? 'RECONSTRUCTED_EOD' : 'BACKTEST_EOD',$at,$payload]);
             break;
         case 'research:import':
         case 'model:import':
@@ -186,8 +342,9 @@ try {
                     [$id,$artifact['horizon'],'SHADOW',timestamp($artifact['trained_until']),
                         max($at,timestamp($artifact['effective_at'])),json($artifact)]);
             } else {
+                $kind = ($artifact['schema'] ?? null) === 'ORFEU_FACTORY_REPORT_V1' ? 'STRATEGY_FACTORY' : 'RESEARCH';
                 query($db, 'INSERT INTO orf_research_run VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE id=id',
-                    [$id,'RESEARCH',$at,json($artifact)]);
+                    [$id,$kind,$at,json($artifact)]);
             }
             $result = ['id' => $id,'status' => $cmd === 'model:import' ? 'SHADOW' : 'IMPORTED'];
             break;

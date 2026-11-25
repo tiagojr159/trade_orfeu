@@ -65,7 +65,9 @@ async function showInstrument(id) {
     ];
     for (const prediction of predictions.items.slice(0, 3)) {
       const d = prediction.details;
-      message.push(prediction.horizon + ' · probabilidade de lucro ' + pct(d.p_profitable) + ' · q10 ' + pct(d.q10) + ' · q90 ' + pct(d.q90));
+      const states = {WAITING: 'Aguardando avaliação', MATURED: 'Avaliada', UNOBSERVABLE: 'Resultado não observável'};
+      message.push(prediction.horizon + ' · probabilidade de lucro ' + pct(d.p_profitable) +
+        ' · q10 ' + pct(d.q10) + ' · q90 ' + pct(d.q90) + ' · ' + states[prediction.evaluation_status]);
     }
     if (!predictions.items.length) message.push('Ainda sem previsões.');
     lines('instrument-detail', message, '');
@@ -167,16 +169,20 @@ function render(data) {
   const ibov = data.benchmarks.IBOV;
   set('ibov', 'Ibovespa · ' + (ibov ? Number(ibov.value).toLocaleString('pt-BR') : '—'));
   set('season', data.season?.name ?? 'Aguardando temporada');
-  set('universe-status', data.universe_status === 'SEED_UNVALIDATED' ? 'Seleção inicial não validada' : 'Seleção modelada');
+  set('universe-status', 'Lista fixa · ' + data.items.length + ' ações');
   byId('markets').replaceChildren(...data.items.map((row) => {
     const control = document.createElement('button');
     control.type = 'button';
-    control.textContent = row.symbol;
+    control.textContent = row.symbol + (row.mandatory ? ' · Obrigatória' : '');
     control.disabled = row.id == null;
     control.addEventListener('click', () => showInstrument(row.id));
     const quote = row.quote;
     const label = quote ? (quote.status === 'STALE' ? 'Cotação antiga · brapi' : 'Cotação observada · brapi') : 'Sem cotação';
-    return cellRow([control, row.name, amount(quote?.price_cents), dateTime(quote?.event_at), pct(row.p_profitable), label]);
+    const health = {PENDING_IDENTITY: 'Cadastro pendente', PENDING_HISTORY: 'Histórico pendente',
+      MONITOR_ONLY: 'Em acompanhamento', EXPERIMENTAL_BASELINE: 'Regra experimental',
+      TRADABLE: 'Sinal elegível', REJECTED: 'Sem sinal elegível', SUSPENDED: 'Suspensa', DELISTED: 'Deslistada'};
+    return cellRow([control, row.name, amount(quote?.price_cents), dateTime(quote?.event_at),
+      pct(row.p_profitable), (health[row.status] ?? row.status) + ' · ' + label]);
   }));
   byId('strategy-rows').replaceChildren(...data.accounts.map((row) => {
     const d = row.details;
@@ -227,9 +233,19 @@ async function loadPanels(signal) {
   ...orders.map((row) => 'Ordem · ' + dateTime(row.decision_at) + ' · ' + row.details.side + ' · ' + row.status)],
   'Nenhuma ordem ou negócio registrado na página atual.');
   lines('research-data', [...models.map((m) => m.horizon + ' · ' + m.status + ' · ' + m.id.slice(0,12)),
-    ...(received(3).items ?? []).map((run) => run.kind + ' · ' + dateTime(run.created_at) + ' · ' + run.id.slice(0,12))],
+    ...(received(3).items ?? []).map((run) => {
+      if (run.kind === 'STRATEGY_FACTORY') {
+        const status = {FROZEN: 'Candidato congelado', NO_CANDIDATE: 'Sem candidato',
+          REJECTED: 'Rejeitado na validação', REVIEW_FOR_SHADOW: 'Aguardando revisão para observação'};
+        return 'Fábrica de estratégias · ' + (status[run.details?.status] ?? 'Relatório') + ' · ' + dateTime(run.created_at);
+      }
+      return run.kind + ' · ' + dateTime(run.created_at) + ' · ' + run.id.slice(0,12);
+    })],
   'Nenhum modelo ou estudo importado.');
   lines('health-data', [...(health.items ?? []).map((source) => source.source + ' · ' + source.status + ' · ' + dateTime(source.last_success)),
+    ...(health.eod_checkpoints ?? []).slice(0, 5).map((job) => 'EOD · ' + job.session_date + ' · ' +
+      ({DONE: 'Processado', GAP: 'Sessão perdida', WAITING: 'Aguardando dados', RETRY: 'Nova tentativa',
+        RUNNING: 'Em processamento', DEAD: 'Requer revisão'}[job.status] ?? job.status)),
     ...(health.jobs ?? []).slice(0,5).map((job) => job.job + ' · ' + job.status + ' · ' + job.detail),
     ...(health.alerts ?? []).map((alert) => alert.code + ' · ' + dateTime(alert.as_of))], 'Aguardando registros de coleta.');
 }

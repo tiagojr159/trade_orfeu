@@ -167,7 +167,7 @@ function importObservations(Store $store, string $file, string $at): array
         foreach (csvRows($file) as $row) {
             $kind = $row['kind'] ?? '';
             $subject = $row['subject'] ?? '';
-            if (!in_array($kind,['BENCHMARK','NEWS','CORPORATE_ACTION','MACRO','ACTION_COVERAGE'],true) ||
+            if (!in_array($kind,['BENCHMARK','NEWS','CORPORATE_ACTION','MACRO','ACTION_COVERAGE','EARNINGS_RELEASE','DIVIDEND_PROFILE'],true) ||
                 !preg_match('/^[A-Za-z0-9_.:-]{1,80}$/D',$subject) ||
                 !preg_match('/^[A-Za-z0-9_.-]{1,40}$/D',$row['source'] ?? '')) {
                 throw new RuntimeException('INVALID_OBSERVATION');
@@ -182,8 +182,16 @@ function importObservations(Store $store, string $file, string $at): array
                 throw new RuntimeException('INVALID_BENCHMARK');
             }
             if ($kind === 'MACRO' && (!is_numeric($payload['value'] ?? null) || !is_finite((float)$payload['value']) ||
-                ($subject === 'CDI' && ($payload['unit'] ?? '') !== 'PERCENT_DAY'))) {
+                ($subject === 'CDI' && ($payload['unit'] ?? '') !== 'PERCENT_DAY') ||
+                ($subject === 'USD_BRL' && (($payload['unit'] ?? '') !== 'BRL_PER_USD' || $payload['value'] <= 0)))) {
                 throw new RuntimeException('INVALID_MACRO');
+            }
+            if (in_array($kind,['EARNINGS_RELEASE','DIVIDEND_PROFILE'],true)) {
+                if (!ctype_digit($subject) ||
+                    !query($store->db,'SELECT 1 FROM orf_instrument WHERE id=?',[$subject])->fetchColumn()) {
+                    throw new RuntimeException('INVALID_STRATEGY_EVIDENCE_IDENTITY');
+                }
+                StrategyEvidence::validate($kind,$effective,$available,$payload);
             }
             if ($kind === 'CORPORATE_ACTION') {
                 $id = $payload['instrument_id'] ?? 0;

@@ -16,10 +16,19 @@ final class Replay
         $this->pipeline = $pipeline;
     }
 
-    public function run(string $from, string $to, int $capital, string $at, int $costMultiplier): array
+    public function run(string $from, string $to, int $capital, string $at, int $costMultiplier,
+        ?string $researchModel = null, bool $fixedRules = false, ?StrategyTrial $trial = null): array
     {
         if ($from >= $to || $to > Calendar::brazilDate($at) || !in_array($costMultiplier,[1,2,3],true) || $capital <= 0) {
             throw new RuntimeException('INVALID_REPLAY_RANGE');
+        }
+        if (($fixedRules && $researchModel !== null) || (($trial || $this->store->usesReconstructedEod()) && !$fixedRules)) {
+            throw new RuntimeException('INCOMPATIBLE_REPLAY_OPTIONS');
+        }
+        if ($researchModel !== null && (!preg_match('/^[a-f0-9]{64}$/D',$researchModel) ||
+            !query($this->store->db, 'SELECT 1 FROM orf_model_version WHERE id=? AND horizon=?',
+                [$researchModel,'5D'])->fetchColumn())) {
+            throw new RuntimeException('UNKNOWN_RESEARCH_MODEL');
         }
         $calendar = $this->store->calendar();
         $rows = $calendar->between($from,$to);
@@ -36,15 +45,23 @@ final class Replay
             $policy[$key] *= $costMultiplier;
         }
         $books = $curves = $counts = [];
-        foreach (Strategies::NAMES as $key => $label) {
+        $ledger = [];
+        $strategyKeys = $fixedRules ? Strategies::RULE_BASELINES : array_keys(Strategies::NAMES);
+        $variants = $trial ? ['candidate'=>$trial->strategy,'baseline'=>$trial->strategy] : array_combine($strategyKeys,$strategyKeys);
+        foreach ($variants as $key => $strategy) {
             $books[$key] = new PaperAccount('replay:' . $key,$policy);
             $books[$key]->deposit($capital,$sessions[0]['open_at']);
             $curves[$key] = [$books[$key]->mark([]) + ['date'=>null]];
-            $counts[$key] = ['fills'=>0,'orders'=>0,'stale_snapshots'=>0];
+            $counts[$key] = ['fills'=>0,'orders'=>0,'stale_snapshots'=>0,'closed_trades'=>0];
+            $ledger[$key] = array_fill_keys(['cash','reserved','payable','receivable','cost','realized'],0);
         }
         $processed = 0;
         $dataSessions = 0;
+        $reconstructedRows = 0;
+        $basketStart = $basketEnd = null;
+        $basketComplete = $fixedRules;
         $prior = [];
+        $inputs = hash_init('sha256');
         foreach ($sessions as $session) {
             $date = $session['session_date'];
             $next = $calendar->next($date);
@@ -59,9 +76,18 @@ final class Replay
             $instruments = $this->store->instruments($date,$session['open_at']);
             $actions = $this->store->observations('CORPORATE_ACTION',$date,$session['open_at']);
             $due = $calendar->next($date,2,true);
-            $rank = $data ? $this->pipeline->rank($session,$calendar,$decisionAt,false,$prior) : [];
+            $rank = $data ? $this->pipeline->rank($session,$calendar,$decisionAt,false,$prior,$fixedRules,$fixedRules,
+                $researchModel,$costMultiplier) : [];
+            if ($trial) {
+                $sourceFeatures = array_map(static function (array $row): array {
+                    unset($row['status'],$row['reason'],$row['rule_ready'],$row['relative_rank'],$row['macro_cost'],
+                        $row['macro_return'],$row['earnings_evidence'],$row['dividend_quality']);
+                    return $row;
+                },$rank);
+                hash_update($inputs,json([$session,$next,$decisionAt,$due,$data,$instruments,$actions,$sourceFeatures]) . "\n");
+            }
             $selected = array_filter($rank, static function (array $row): bool { return $row['rank'] !== null; });
-            $rebalance = !$prior || (new \DateTimeImmutable($date))->format('o-W') !==
+            $rebalance = $fixedRules || !$prior || (new \DateTimeImmutable($date))->format('o-W') !==
                 (new \DateTimeImmutable($next['session_date']))->format('o-W');
             if ($rebalance) {
                 $prior = $selected;
@@ -80,8 +106,20 @@ final class Replay
             });
             $prices = [];
             foreach ($data as $id => $markets) {
+                foreach ($markets as $bar) {
+                    $reconstructedRows += (int) (($bar['availability_evidence'] ?? '') === 'RECONSTRUCTED_EOD');
+                }
                 if (isset($markets['010'])) {
                     $prices[$id] = (int) $markets['010']['close_px'];
+                }
+            }
+            if ($basketComplete) {
+                $marks = $this->basketMarks($prices,$instruments,$decisionAt);
+                if ($marks === null || ($basketStart !== null && array_keys($marks) !== array_keys($basketStart))) {
+                    $basketComplete = false;
+                } else {
+                    $basketStart = $basketStart ?? $marks;
+                    $basketEnd = $marks;
                 }
             }
             foreach ($books as $key => $book) {
@@ -94,27 +132,43 @@ final class Replay
                     $book->settle($date,$session['open_at']);
                 }
                 $book->execute($session,$data,$instruments,$due);
-                $mark = $book->close($prices,$date);
+                $mark = $book->close($prices,$date,$decisionAt);
                 $paused = $mark['drawdown'] <= -.10 || $mark['daily_return'] <= -.03;
                 foreach ($rank as $id => $candidate) {
                     if (!isset($prices[$id]) || !eligible($instruments[$id] ?? [])) {
                         continue;
                     }
-                    if ($candidate['rank'] === null) {
+                    if ($candidate['rank'] === null && !$fixedRules) {
                         if (!isset($book->state['positions'][$id])) {
                             continue;
                         }
                         $candidate['status'] = 'EXIT_ONLY';
                     }
                     $candidate['price'] = $prices[$id];
-                    $book->decide($key,$candidate,$mark,$session,$next,$decisionAt,$paused);
+                    $book->decide($variants[$key],$candidate,$mark,$session,$next,$decisionAt,$paused,
+                        $key === 'candidate' ? $trial : null);
                 }
                 $curves[$key][] = $mark + ['date'=>$date];
                 $counts[$key]['fills'] += count($book->fills);
+                foreach ($book->fills as $fill) {
+                    if ($fill['side'] === 'SELL' && !isset($book->state['positions'][$fill['instrument_id']])) {
+                        $counts[$key]['closed_trades']++;
+                    }
+                }
                 $counts[$key]['orders'] += count(array_filter($book->orders,static function (array $o): bool {
                     return $o['status'] === 'ACCEPTED';
                 }));
                 $counts[$key]['stale_snapshots'] += (int) ($mark['status'] === 'STALE');
+                if ($trial) {
+                    foreach ($book->events as $event) {
+                        foreach ($event['deltas'] as $field => $amount) {
+                            $ledger[$key][$field] += $amount;
+                        }
+                    }
+                    if (!PaperAccount::matchesLedger($ledger[$key],$book->state)) {
+                        throw new RuntimeException('BLOCKED_REPLAY_LEDGER_MISMATCH');
+                    }
+                }
                 $book->orders = $book->fills = $book->events = [];
             }
             $processed++;
@@ -125,10 +179,26 @@ final class Replay
         }
         $cdiRows = $this->store->observations('MACRO',$to,$at)['CDI'] ?? [];
         $ibovRows = $this->store->observations('BENCHMARK',$to,$at)['IBOV'] ?? [];
+        $basketReturn = null;
+        if ($basketComplete && $basketStart && $processed > 1) {
+            $basketReturn = $this->basketReturn($basketStart,$basketEnd,$sessions[0]['session_date'],
+                $sessions[$processed-1]['session_date'],$at);
+        }
         $result = [
             'kind'=>'BACKTEST_EOD','status'=>'RESEARCH_ONLY','from'=>$from,'to'=>$to,'cost_multiplier'=>$costMultiplier,
-            'sessions'=>$processed,'eod_sessions'=>$dataSessions,'capital_cents'=>$capital,'strategy_results'=>[],
+            'sessions'=>$processed,'eod_sessions'=>$dataSessions,'capital_cents'=>$capital,
+            'research_model'=>$researchModel,'universe_policy'=>$fixedRules ? 'FIXED_VOLATILE_10_V1' : 'HISTORICAL_CATALOG',
+            'selection_bias'=>$fixedRules && $from < '2026-11-24' ? 'RETROSPECTIVE_FIXED_UNIVERSE' : null,
+            'availability_policy'=>$this->store->usesReconstructedEod() ? 'RECONSTRUCTED_EOD' : 'AS_RECORDED',
+            'reconstruction_policy'=>$this->store->usesReconstructedEod() ? Store::EOD_RECONSTRUCTION : null,
+            'reconstructed_session_bar_rows'=>$reconstructedRows,'strategy_results'=>[],
+            'basket_equal_weight_close_to_close_theoretical'=>$basketReturn,
         ];
+        if ($trial) {
+            hash_update($inputs,json([$cdiRows,$ibovRows]) . "\n");
+            $result['replay_input_sha256'] = hash_final($inputs);
+            $result['ledger_reconciled'] = true;
+        }
         foreach ($curves as $key => $curve) {
             $last = end($curve);
             $growth = 1.0;
@@ -184,6 +254,43 @@ final class Replay
             ];
         }
         return $result;
+    }
+
+    private function basketMarks(array $prices, array $instruments, string $at): ?array
+    {
+        $marks = [];
+        foreach ($this->store->fixedWatchlist($at) as $symbol => $member) {
+            $id = $member['instrument_id'];
+            if ($id === null || isset($marks[$id]) || ($instruments[$id]['symbol'] ?? null) !== $symbol ||
+                ($prices[$id] ?? 0) <= 0) {
+                return null;
+            }
+            $marks[$id] = $prices[$id];
+        }
+        return $marks;
+    }
+
+    private function basketReturn(array $start, array $end, string $from, string $to, string $at): ?float
+    {
+        $coverage = $this->store->observations('ACTION_COVERAGE',$to,$at);
+        foreach ($start as $instrument => $price) {
+            $record = $coverage[$instrument][$to] ?? [];
+            if (($record['verified'] ?? false) !== true || ($record['start'] ?? '9999-12-31') > $from) {
+                return null;
+            }
+        }
+        foreach ($this->store->observations('CORPORATE_ACTION',$to,$at) as $dates) {
+            foreach ($dates as $date => $event) {
+                if ($date >= $from && isset($start[$event['instrument_id'] ?? 0])) {
+                    return null;
+                }
+            }
+        }
+        $sum = 0.0;
+        foreach ($start as $id => $price) {
+            $sum += $end[$id] / $price - 1;
+        }
+        return $sum / count($start);
     }
 }
 

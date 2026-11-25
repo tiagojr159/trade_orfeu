@@ -127,6 +127,40 @@ final class Brapi
 
 final class Cotahist
 {
+    public static function marketRecords(iterable $lines): \Generator
+    {
+        $count = 0;
+        $header = null;
+        $closed = false;
+        foreach ($lines as $line) {
+            $line = rtrim($line, "\r\n");
+            $type = substr($line, 0, 2);
+            $count++;
+            if (strlen($line) !== 245 || $closed) {
+                throw new RuntimeException('INVALID_COTAHIST_ENVELOPE');
+            }
+            if ($count === 1) {
+                if ($type !== '00' || substr($line, 2, 8) !== 'COTAHIST') {
+                    throw new RuntimeException('INVALID_COTAHIST_HEADER');
+                }
+                $header = substr($line, 2, 29);
+            } elseif ($type === '99') {
+                $total = substr($line, 31, 11);
+                if ($count < 3 || substr($line, 2, 29) !== $header || !ctype_digit($total) || (int) $total !== $count) {
+                    throw new RuntimeException('INVALID_COTAHIST_TRAILER');
+                }
+                $closed = true;
+            } elseif ($type !== '01') {
+                throw new RuntimeException('INVALID_COTAHIST_RECORD');
+            } else {
+                yield $line;
+            }
+        }
+        if (!$closed) {
+            throw new RuntimeException('COTAHIST_TRAILER_MISSING');
+        }
+    }
+
     public static function parse(string $line): ?array
     {
         $line = rtrim($line, "\r\n");

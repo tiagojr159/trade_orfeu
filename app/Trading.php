@@ -7,6 +7,9 @@ use RuntimeException;
 
 final class Strategies
 {
+    public const RULE_BASELINES = ['MOMENTUM','RELATIVE_STRENGTH','MEAN_REVERSION','BREAKOUT','LOW_VOL','ADAPTIVE_REGIME',
+        'EARNINGS_DRIFT','DIVIDEND_QUALITY','MACRO_ROTATION','META_CHAMPION'];
+
     public const NAMES = [
         'ORFEU_AI' => 'Ensemble preditivo', 'MULTIHORIZON' => 'Consenso de horizontes',
         'MOMENTUM' => 'Tendência EMA', 'RELATIVE_STRENGTH' => 'Força transversal',
@@ -20,8 +23,8 @@ final class Strategies
 
     public static function signal(string $key, array $f): string
     {
-        $momentum = $f['trend'] > 0 && $f['mom20'] > 0 && ($f['relative'] ?? 0) > 0;
-        $reversion = $f['z20'] < -1.5 && $f['rsi'] < 35 && $f['mom60'] > -.10;
+        $momentum = ($f['trend'] ?? 0) > 0 && ($f['mom20'] ?? 0) > 0 && ($f['volume_ratio'] ?? 0) > 1;
+        $reversion = ($f['z20'] ?? 0) < -1.5 && ($f['rsi'] ?? 50) < 35 && ($f['mom60'] ?? -1) > -.10;
         switch ($key) {
             case 'ORFEU_AI':
                 $active = $f['p_profitable'] >= .60;
@@ -36,16 +39,19 @@ final class Strategies
                 $active = $momentum;
                 break;
             case 'RELATIVE_STRENGTH':
+                if (!isset($f['relative_rank'])) {
+                    return 'MISSING_BENCHMARK';
+                }
                 $active = ($f['relative_rank'] ?? 0) >= .8 && $f['mom60'] > 0;
                 break;
             case 'MEAN_REVERSION':
-                $active = $reversion && $f['vol20'] < .45;
+                $active = $reversion && ($f['vol20'] ?? 1) < .45;
                 break;
             case 'BREAKOUT':
-                $active = $f['breakout'] && $f['volume_ratio'] >= 1.3;
+                $active = !empty($f['breakout']) && ($f['volume_ratio'] ?? 0) >= 1.3;
                 break;
             case 'LOW_VOL':
-                $active = $f['vol20'] <= .25 && $f['trend'] > 0;
+                $active = ($f['vol20'] ?? 1) <= .25 && ($f['trend'] ?? 0) > 0;
                 break;
             case 'ADAPTIVE_REGIME':
                 if (!isset($f['regime'])) {
@@ -57,7 +63,11 @@ final class Strategies
                 $active = $f['rank'] <= 4;
                 break;
             case 'VWAP_RECLAIM':
-                return 'MISSING_INTRADAY';
+                if (!isset($f['intraday_vwap_entry'])) {
+                    return 'MISSING_INTRADAY';
+                }
+                $active = $f['intraday_vwap_entry'];
+                break;
             case 'QUALITY_VALUE':
                 if (($f['fundamental_status'] ?? '') !== 'AVAILABLE') {
                     return 'MISSING_OR_STALE_FUNDAMENTALS';
@@ -65,13 +75,30 @@ final class Strategies
                 $active = $f['net_margin'] > 0 && $f['ebit_margin'] > 0;
                 break;
             case 'EARNINGS_DRIFT':
-                return 'MISSING_PUBLISHED_CONSENSUS';
+                if (!isset($f['earnings_evidence'])) {
+                    return 'MISSING_EARNINGS_RELEASE_OR_REACTION';
+                }
+                $active = $f['earnings_evidence']['active'] && ($f['mom5'] ?? 0) > 0;
+                break;
             case 'DIVIDEND_QUALITY':
-                return 'MISSING_PAYOUT_HISTORY';
+                if (!isset($f['dividend_quality'])) {
+                    return 'MISSING_PAYOUT_HISTORY';
+                }
+                $active = $f['dividend_quality'] && $f['trend'] > 0;
+                break;
             case 'MACRO_ROTATION':
-                return 'MISSING_VALIDATED_MACRO_MODEL';
+                if (!isset($f['macro_return'],$f['macro_cost'])) {
+                    return 'MISSING_POINT_IN_TIME_FX_HISTORY';
+                }
+                $active = $f['macro_return'] > $f['macro_cost'] && $f['trend'] > 0;
+                break;
             case 'META_CHAMPION':
-                return 'MISSING_OOF_META_MODEL';
+                $votes = 0;
+                foreach (['MOMENTUM','MEAN_REVERSION','BREAKOUT','LOW_VOL'] as $rule) {
+                    $votes += (int) (self::signal($rule,$f) === 'SIGNAL_PASS');
+                }
+                $active = $votes >= 2;
+                break;
             default:
                 throw new RuntimeException('UNKNOWN_STRATEGY');
         }
@@ -80,7 +107,33 @@ final class Strategies
 
     public static function holding(string $key): int
     {
-        return in_array($key, ['MOMENTUM', 'RELATIVE_STRENGTH', 'LOW_VOL', 'PORTFOLIO_ROTATION'], true) ? 20 : 5;
+        return ['DIVIDEND_QUALITY'=>40,'EARNINGS_DRIFT'=>10,'MACRO_ROTATION'=>15,'MOMENTUM'=>20,
+            'RELATIVE_STRENGTH'=>20,'LOW_VOL'=>20,'PORTFOLIO_ROTATION'=>20][$key] ?? 5;
+    }
+
+    public static function variant(string $key, array $row): ?string
+    {
+        return [
+            'EARNINGS_DRIFT'=>$row['earnings_evidence']['variant'] ?? null,
+            'DIVIDEND_QUALITY'=>isset($row['dividend_quality']) ? 'DOCUMENTED_PAYOUT_RULE' : null,
+            'MACRO_ROTATION'=>isset($row['macro_return']) ? 'LAGGED_FX_RULE' : null,
+            'META_CHAMPION'=>'EXPERIMENTAL_RULE_VOTE',
+        ][$key] ?? null;
+    }
+
+    public static function evidenceExit(string $key, array $row): ?string
+    {
+        if ($key === 'EARNINGS_DRIFT' && array_key_exists('mom5',$row) && $row['mom5'] <= 0) {
+            return 'EARNINGS_DRIFT_FADED';
+        }
+        if ($key === 'DIVIDEND_QUALITY' && ($row['dividend_quality'] ?? null) === false) {
+            return 'DIVIDEND_QUALITY_DETERIORATED';
+        }
+        if ($key === 'MACRO_ROTATION' && isset($row['macro_return'],$row['macro_cost']) &&
+            $row['macro_return'] < -$row['macro_cost']) {
+            return 'MACRO_SIGNAL_REVERSED';
+        }
+        return null;
     }
 }
 
@@ -89,6 +142,7 @@ final class PaperAccount
     public const POLICY = [
         'version' => 'EOD_NEXT_OPEN_V1', 'max_positions' => 4, 'weight_bps' => 3000,
         'sector_bps' => 4000, 'risk_bps' => 100, 'cash_buffer_bps' => 500,
+        'max_exposure_bps'=>9000,'max_total_risk_bps'=>300,'vol_target_bps'=>3500,
         'regular_penalty_bps' => 8, 'odd_penalty_bps' => 18, 'fee_bps' => 4,
     ];
 
@@ -142,6 +196,35 @@ final class PaperAccount
     public function available(): int
     {
         return $this->state['cash'] - $this->state['reserved'] - $this->state['payable'];
+    }
+
+    public static function matchesLedger(array $totals, array $state): bool
+    {
+        foreach (['cash','reserved','payable','receivable','cost','realized'] as $key) {
+            if (!isset($totals[$key]) || (int) $totals[$key] !== $state[$key]) {
+                return false;
+            }
+        }
+        $payable = $receivable = $reserved = $cost = 0;
+        foreach ($state['obligations'] as $item) {
+            if ($item['side'] === 'BUY') {
+                $payable += $item['amount'];
+            } else {
+                $receivable += $item['amount'];
+            }
+        }
+        foreach ($state['pending'] as $item) {
+            $reserved += $item['budget'];
+        }
+        foreach ($state['positions'] as $item) {
+            if ($item['quantity'] < 1) {
+                return false;
+            }
+            $cost += $item['cost'];
+        }
+        return $payable === $state['payable'] && $receivable === $state['receivable'] &&
+            $reserved === $state['reserved'] && $cost === $state['cost'] &&
+            $state['cash'] >= $reserved + $payable;
     }
 
     public function mark(array $prices): array
@@ -213,8 +296,11 @@ final class PaperAccount
     }
 
     public function decide(string $strategy, array $row, array $marked, array $session, array $next,
-        string $asOf, bool $paused): array
+        string $asOf, bool $paused, ?StrategyTrial $trial = null, ?string $slotKey = null): array
     {
+        if ($trial && $trial->strategy !== $strategy) {
+            throw new RuntimeException('TRIAL_STRATEGY_MISMATCH');
+        }
         $id = (int) $row['id'];
         $position = $this->state['positions'][$id] ?? null;
         foreach ($this->state['pending'] as $order) {
@@ -223,11 +309,14 @@ final class PaperAccount
             }
         }
         $buy = !$position;
+        $plannedRisk = 0;
         if (!$buy) {
             $reason = $row['price'] <= $position['stop'] ? 'STOP_AT_CLOSE' : null;
-            if ($reason === null && ($row['status'] === 'EXIT_ONLY' || $position['age'] >= Strategies::holding($strategy))) {
+            $holding = $trial ? $trial->holding : Strategies::holding($strategy);
+            if ($reason === null && ($row['status'] === 'EXIT_ONLY' || $position['age'] >= $holding)) {
                 $reason = $row['status'] === 'EXIT_ONLY' ? 'EXIT_ONLY' : 'MAX_HOLDING';
             }
+            $reason = $reason ?? Strategies::evidenceExit($strategy,$row);
             if ($reason === null && ($row['edge'] ?? 0) >= 0 &&
                 ($strategy !== 'MEAN_REVERSION' || ($row['z20'] ?? -1) < 0)) {
                 return ['HOLD', 'WITHIN_EXIT_POLICY'];
@@ -236,25 +325,36 @@ final class PaperAccount
             $budget = 0;
             $stop = $position['stop'];
         } else {
-            if ($paused || $row['status'] !== 'TRADABLE' || $marked['status'] !== 'AVAILABLE') {
+            $baseline = $row['status'] === 'EXPERIMENTAL_BASELINE' && in_array($strategy, Strategies::RULE_BASELINES, true);
+            if ($paused || (!$baseline && $row['status'] !== 'TRADABLE') || $marked['status'] !== 'AVAILABLE') {
+                if (!$paused && $row['status'] === 'EXPERIMENTAL_BASELINE' && !$baseline) {
+                    return ['NO_TRADE', 'STRATEGY_REQUIRES_ADDITIONAL_EVIDENCE'];
+                }
                 return ['NO_TRADE', $paused ? 'PAUSED_OR_DRAWDOWN' : ($row['reason'] ?? 'INSUFFICIENT_DATA')];
             }
             if ($marked['equity_cents'] <= 0 || count($this->state['positions']) + count($this->state['pending']) >= $this->policy['max_positions']) {
                 return ['NO_TRADE', 'POSITION_LIMIT'];
             }
-            $reason = Strategies::signal($strategy, $row);
+            $reason = $trial ? ($trial->signal($row) ? 'SIGNAL_PASS' : 'STRATEGY_FILTER') : Strategies::signal($strategy, $row);
             if ($reason !== 'SIGNAL_PASS') {
                 return ['NO_TRADE', $reason];
             }
-            $sector = 0;
+            $sector = $exposure = $portfolioRisk = 0;
             foreach ($this->state['positions'] as $p) {
+                $value = $p['quantity'] * $p['mark'];
+                $exposure += $value;
+                $portfolioRisk += $p['quantity'] * max(0,$p['mark']-$p['stop']);
                 if ($p['sector'] === $row['sector']) {
-                    $sector += $p['quantity'] * $p['mark'];
+                    $sector += $value;
                 }
             }
             foreach ($this->state['pending'] as $p) {
-                if ($p['sector'] === $row['sector'] && $p['side'] === 'BUY') {
-                    $sector += $p['budget'];
+                if ($p['side'] === 'BUY') {
+                    $exposure += $p['budget'];
+                    $portfolioRisk += $p['planned_risk_cents'] ?? $p['budget'];
+                    if ($p['sector'] === $row['sector']) {
+                        $sector += $p['budget'];
+                    }
                 }
             }
             $equity = $marked['equity_cents'];
@@ -262,11 +362,21 @@ final class PaperAccount
                 return intdiv($equity * $bps, 10000);
             };
             $budget = max(0, min($cap($this->policy['weight_bps']), $cap($this->policy['sector_bps']) - $sector,
+                $cap($this->policy['max_exposure_bps'] ?? self::POLICY['max_exposure_bps']) - $exposure,
                 $this->available() - $cap($this->policy['cash_buffer_bps'])));
-            $stop = max(1, (int) floor($row['price'] * (1 - max(.02, 2 * $row['atr']))));
+            $atrStop = $trial ? $trial->atrStop : 2;
+            $stop = max(1, (int) floor($row['price'] * (1 - max(.02, $atrStop * $row['atr']))));
             $unitRisk = max(1, $row['price'] - $stop + (int) ceil($row['price'] * .01));
+            $target = ($this->policy['vol_target_bps'] ?? self::POLICY['vol_target_bps']) / 10000;
+            $scale = min(1.0,$target/max($target,$row['vol20'] ?? 0.0));
+            $riskCash = min((int) floor($cap($this->policy['risk_bps'])*$scale),
+                $cap($this->policy['max_total_risk_bps'] ?? self::POLICY['max_total_risk_bps'])-$portfolioRisk);
+            if ($riskCash < $unitRisk || $budget < $row['price']) {
+                return ['NO_TRADE','AGGREGATE_RISK_OR_EXPOSURE_LIMIT'];
+            }
             $quantity = min(intdiv($budget, max(1, (int) ceil($row['price'] * 1.005))),
-                intdiv($cap($this->policy['risk_bps']), $unitRisk), intdiv($row['adv_shares'], 1000));
+                intdiv($riskCash,$unitRisk),intdiv($row['adv_shares'],1000));
+            $plannedRisk = $quantity*$unitRisk;
         }
         $lot = (int) $row['lot_size'];
         $market = $quantity >= $lot ? '010' : '020';
@@ -277,13 +387,15 @@ final class PaperAccount
             return ['NO_TRADE', $quantity < 1 ? 'INSUFFICIENT_CAPITAL_OR_LIQUIDITY' : 'ODD_LOT_UNVERIFIED'];
         }
         $order = [
-            'id' => hash('sha256', json([$this->key, $id, $session['session_date'], $buy])),
+            'id' => hash('sha256', json([$this->key, $id, $session['session_date'], $buy] +
+                ($slotKey === null ? [] : [4=>$slotKey]))),
             'instrument_id' => $id, 'sector' => $row['sector'], 'decision_at' => $asOf,
             'eligible_at' => $next['open_at'], 'session' => $next['session_date'],
             'side' => $buy ? 'BUY' : 'SELL', 'quantity' => $quantity, 'remaining' => $quantity,
             'market' => $market, 'lot' => $lot, 'tick' => (int) $row['tick_cents'],
             'budget' => $budget, 'max_qty' => intdiv((int) ($row['adv_shares'] ?? 0), 1000),
             'stop' => $stop, 'status' => 'ACCEPTED', 'reason' => $reason ?? 'EDGE_DETERIORATED',
+            'planned_risk_cents'=>$plannedRisk,'risk_model'=>'AGGREGATE_RISK_V2',
         ];
         if ($asOf >= $next['open_at']) {
             return ['NO_TRADE', 'MISSED_OPEN'];
@@ -296,10 +408,18 @@ final class PaperAccount
         return [$order['side'], $order['reason']];
     }
 
-    public function execute(array $session, array $opening, array $instruments, ?array $settlement, bool $paused = false): void
+    public function execute(array $session, array $opening, array $instruments, ?array $settlement, bool $paused = false,
+        ?array $buyIds = null, ?string $processedAt = null, bool $lateRecovery = false,
+        string $priceEvidence = 'OPENING_OHLC_PROXY'): void
     {
-        foreach ($this->state['pending'] as $key => $order) {
-            if ($order['session'] > $session['session_date']) {
+        $pending = $this->state['pending'];
+        uasort($pending,static function (array $left,array $right): int {
+            return [$left['side'] === 'BUY',$left['decision_at'],$left['id']] <=>
+                [$right['side'] === 'BUY',$right['decision_at'],$right['id']];
+        });
+        foreach ($pending as $key => $order) {
+            if ($order['session'] > $session['session_date'] ||
+                ($order['session'] === $session['session_date'] && $order['eligible_at'] > $session['open_at'])) {
                 continue;
             }
             $id = $order['instrument_id'];
@@ -308,11 +428,17 @@ final class PaperAccount
             $usable = $bar && $order['eligible_at'] === $session['open_at'] &&
                 $bar['open_at'] === $session['open_at'] && $order['decision_at'] < $bar['open_at'] &&
                 $order['session'] === $session['session_date'] && $settlement &&
-                eligible($instruments[$id] ?? []) && (!$buy || !$paused);
+                eligible($instruments[$id] ?? []) && (!$buy || (!$paused && ($buyIds === null ||
+                    (string) ($buyIds[$instruments[$id]['symbol']] ?? '') === (string) $id)));
             $status = 'EXPIRED';
             $executed = 0;
             if ($usable) {
-                $executed = $this->fill($order, (int) $bar['open_px'], $settlement['session_date']);
+                $evidence = ['price_evidence'=>$priceEvidence];
+                if ($processedAt !== null) {
+                    $evidence += ['processed_at'=>$processedAt,'late_recovery'=>$lateRecovery,
+                        'source_bar_hash'=>$bar['raw_hash'] ?? null,'source_available_at'=>$bar['available_at'] ?? null];
+                }
+                $executed = $this->fill($order, (int) $bar['open_px'], $settlement['session_date'],$evidence);
                 if ($executed > 0) {
                     $status = $executed === $order['quantity'] ? 'FILLED' : 'PARTIAL_EXPIRED';
                 }
@@ -327,20 +453,18 @@ final class PaperAccount
         }
     }
 
-    private function fill(array $o, int $reference, string $settlement): int
+    private function fill(array $o, int $reference, string $settlement, array $evidence): int
     {
         $buy = $o['side'] === 'BUY';
         $adverse = $this->policy[$o['market'] === '020' ? 'odd_penalty_bps' : 'regular_penalty_bps'];
-        $tickFactor = 10000 * $o['tick'];
-        $rounded = intdiv($reference * (10000 + ($buy ? $adverse : -$adverse)) + ($buy ? $tickFactor - 1 : 0), $tickFactor);
-        $price = $rounded * $o['tick'];
+        $price = ExecutionCost::price($reference,$o['tick'],$adverse,$buy);
         if ($price <= 0) {
             return 0;
         }
         $position = $this->state['positions'][$o['instrument_id']] ?? null;
         $qty = min($o['remaining'], $o['max_qty']);
         if ($buy) {
-            $qty = min($qty, intdiv($o['budget'] * 10000, $price * (10000 + $this->policy['fee_bps'])));
+            $qty = min($qty, ExecutionCost::affordable($o['budget'],$price,$this->policy['fee_bps']));
         } else {
             $qty = min($qty, $position['quantity'] ?? 0);
         }
@@ -350,9 +474,9 @@ final class PaperAccount
         if ($qty <= 0) {
             return 0;
         }
-        $notional = $qty * $price;
-        $fee = intdiv($notional * $this->policy['fee_bps'] + 9999, 10000);
-        $amount = $buy ? $notional + $fee : $notional - $fee;
+        $charge = ExecutionCost::charge($price,$qty,$this->policy['fee_bps'],$buy);
+        $fee = $charge['fee'];
+        $amount = $charge['cash'];
         $id = $o['instrument_id'];
         $key = hash('sha256', $o['id'] . ':open');
         $fill = [
@@ -360,8 +484,8 @@ final class PaperAccount
             'side' => $o['side'], 'quantity' => $qty, 'market' => $o['market'], 'instrument_id' => $id,
             'reference_cents' => $reference, 'price_cents' => $price, 'fees_cents' => $fee,
             'slippage_cents' => abs($price - $reference) * $qty, 'model' => $this->policy['version'],
-            'realized_cents' => null,
-        ];
+            'realized_cents' => null, 'fee_bps'=>$this->policy['fee_bps'],'adverse_bps'=>$adverse,
+        ] + $evidence;
         if ($buy) {
             if ($amount > $o['budget']) {
                 return 0;
@@ -392,7 +516,7 @@ final class PaperAccount
         return $qty;
     }
 
-    public function close(array $prices, string $date): array
+    public function close(array $prices, string $date, ?string $asOf = null): array
     {
         $marked = $this->mark($prices);
         $equity = $marked['equity_cents'];
@@ -404,10 +528,19 @@ final class PaperAccount
             $this->state['last_equity'] = $equity;
         }
         $this->state['last_day'] = $date;
-        foreach ($this->state['positions'] as &$pos) {
+        foreach ($this->state['positions'] as $id=>&$pos) {
             $pos['age']++;
-            $pos['stop'] = max($pos['stop'], (int) floor($pos['mark'] * .95));
+            if (!isset($prices[$id])) {
+                continue;
+            }
+            $previous = $pos['stop'];
+            $pos['stop'] = max($previous,(int) floor($pos['mark']*.95));
+            if ($asOf !== null && $pos['stop'] > $previous) {
+                $this->event('trailing:' . $id . ':' . $date,'STOP_UPDATED',$asOf,[],
+                    ['instrument_id'=>$id,'previous_stop_cents'=>$previous,'stop_cents'=>$pos['stop'],'mark_cents'=>$pos['mark']]);
+            }
         }
+        unset($pos);
         unset($pos);
         return $marked;
     }

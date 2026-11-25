@@ -167,6 +167,7 @@ function cents(string $value): int
     return (int) $m[1] * 100 + (int) str_pad($m[2] ?? '', 2, '0');
 }
 
-foreach (['Market', 'Sources', 'Quant', 'Trading', 'Store', 'Pipeline', 'Research', 'Replay', 'Admin', 'Http'] as $module) {
+foreach (['Market', 'Sources', 'Quant', 'StrategyTrial', 'StrategyEvidence', 'ExecutionCost', 'Trading', 'Store', 'SessionJobs', 'Pipeline',
+    'Research', 'Prediction', 'Replay', 'Intraday', 'Admin', 'Http'] as $module) {
     require_once __DIR__ . '/' . $module . '.php';
 }

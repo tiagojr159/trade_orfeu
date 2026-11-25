@@ -31,6 +31,7 @@ try {
         'migrations' => $store->migrate(false),
         'calendar_sessions_and_closures' => $store->importCalendar(Calendar::official2026()),
         'catalog_rows' => $store->catalog(ROOT . '/config/seed-catalog.csv'),
+        'watchlist' => $store->seedFixedWatchlist(utc(), false),
         'season' => $store->season('season-001', cents($config->get('INITIAL_CAPITAL_BRL', '1000.00')), utc()),
     ];
     echo json($result) . PHP_EOL;

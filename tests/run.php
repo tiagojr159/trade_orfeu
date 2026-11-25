@@ -263,6 +263,143 @@ $cases = [
     },
 ];
 
+$cases['test_fixed_universe_symbols'] = static function (): void {
+    $fixed = require ROOT . '/config/fixed-universe.php';
+    demand(array_keys($fixed['members']) === ['BBAS3','VALE3','PETR4','MGLU3','HAPV3',
+        'BRKM5','PCAR3','SIMH3','MOVI3','LJQQ3']);
+    demand($fixed['mandatory_symbols'] === ['BBAS3','VALE3','PETR4']);
+};
+$cases['test_rule_baseline_without_model_and_opening_watchlist_gate'] = static function (): void {
+    [$calendar,$session,$next,$row,$book] = scenario();
+    $candidate = array_replace($row, ['status'=>'EXPERIMENTAL_BASELINE','volume_ratio'=>1.2]);
+    unset($candidate['p_profitable'],$candidate['edge']);
+    demand($book->decide('ORFEU_AI',$candidate,$book->mark([]),$session,$next,$session['close_at'],false)[0] === 'NO_TRADE');
+    demand($book->decide('MOMENTUM',$candidate,$book->mark([]),$session,$next,$session['close_at'],false)[0] === 'BUY');
+    $book->execute($next,[1=>['020'=>['open_at'=>$next['open_at'],'open_px'=>2000]]],
+        [1=>instrument()],$calendar->next($next['session_date'],2,true),false,[]);
+    demand($book->fills === [] && $book->state['reserved'] === 0);
+};
+
+$cases['test_cotahist_requires_complete_envelope'] = static function (): void {
+    $header = str_pad('00COTAHIST.2026BOVESPA 20261125',245);
+    $record = str_pad('01',245);
+    $trailer = str_pad('99' . substr($header,2,29) . '00000000003',245);
+    demand(iterator_to_array(Cotahist::marketRecords([$header,$record,$trailer])) === [$record]);
+    fails(static function () use ($header,$record): void {
+        iterator_to_array(Cotahist::marketRecords([$header,$record]));
+    },'COTAHIST_TRAILER_MISSING');
+    fails(static function () use ($header,$record,$trailer): void {
+        iterator_to_array(Cotahist::marketRecords([$header,$record,$record,$trailer]));
+    },'INVALID_COTAHIST_TRAILER');
+    fails(static function () use ($header,$record,$trailer): void {
+        iterator_to_array(Cotahist::marketRecords([$header,$record,$trailer,$record]));
+    },'INVALID_COTAHIST_ENVELOPE');
+};
+
+$cases['test_prediction_maturity_and_scoring'] = static function (): void {
+    $first = ['open_px'=>1000,'low_px'=>900,'high_px'=>1100,'close_px'=>1050,'volume'=>10,
+        'open_at'=>utc('2026-11-19T13:00:00Z'),'close_at'=>utc('2026-11-19T20:00:00Z'),
+        'available_at'=>utc('2026-11-19T21:00:00Z'),'raw_hash'=>'first'];
+    $last = array_replace($first,['open_px'=>1100,'open_at'=>utc('2026-11-23T13:00:00Z'),
+        'close_at'=>utc('2026-11-23T20:00:00Z'),'available_at'=>utc('2026-11-23T21:00:00Z'),'raw_hash'=>'last']);
+    $coverageAt = utc('2026-11-23T22:00:00Z');
+    $bars = [$first,$last];
+    demand(PredictionEvaluation::label($bars,$coverageAt,false,$last['available_at'])['status'] === 'WAITING');
+    demand(PredictionEvaluation::label($bars,$coverageAt,true,$coverageAt)['status'] === 'UNOBSERVABLE');
+    $label = PredictionEvaluation::label($bars,$coverageAt,false,$coverageAt);
+    demand($label['status'] === 'MATURED' && $label['bar_hashes'] === ['first','last']);
+    $prediction = ['p_up'=>.8,'p_profitable'=>.7,'mu_gross'=>.06,'model_cost'=>.01,'q10'=>-.01,'q50'=>.06,'q90'=>.14];
+    $scores = PredictionEvaluation::score($prediction,$label['gross']);
+    demand(abs($scores['brier_up']-.04) < 1e-10 && abs($scores['net_after_model_cost']-.09) < 1e-10);
+    demand($scores['interval_covered'] === 1 && $scores['direction_correct'] === 1);
+    fails(static function () use ($prediction): void {
+        PredictionEvaluation::score(array_replace($prediction,['p_up'=>1.1]),.1);
+    },'INVALID_PREDICTION_PAYLOAD');
+};
+
+$cases['test_contextual_eod_strategies_require_their_own_inputs'] = static function (): void {
+    $feature = ['mom5'=>.04,'mom20'=>.1,'trend'=>.02,'volume_ratio'=>1.5,'breakout'=>true,'vol20'=>.32];
+    demand(Strategies::signal('EARNINGS_DRIFT',$feature) === 'MISSING_EARNINGS_RELEASE_OR_REACTION');
+    demand(Strategies::signal('DIVIDEND_QUALITY',$feature) === 'MISSING_PAYOUT_HISTORY');
+    demand(Strategies::signal('MACRO_ROTATION',$feature) === 'MISSING_POINT_IN_TIME_FX_HISTORY');
+    demand(Strategies::signal('META_CHAMPION',$feature) === 'SIGNAL_PASS');
+    demand(Strategies::signal('META_CHAMPION',[]) === 'STRATEGY_FILTER');
+    $release = ['released_at'=>'2026-11-18T23:00:00Z','evidence_ref'=>'SYNTHETIC'];
+    StrategyEvidence::validate('EARNINGS_RELEASE','2026-11-18',utc('2026-11-18T23:00:00Z'),$release);
+    $reaction = StrategyEvidence::earnings(['2026-11-18'=>$release],[
+        ['close_at'=>utc('2026-11-19T20:00:00Z'),'close_px'=>1060],
+        ['close_at'=>utc('2026-11-18T20:00:00Z'),'close_px'=>1000],
+    ],.01);
+    $feature['earnings_evidence'] = $reaction;
+    demand(Strategies::signal('EARNINGS_DRIFT',$feature) === 'SIGNAL_PASS');
+    demand(Strategies::variant('EARNINGS_DRIFT',$feature) === 'POST_EARNINGS_PRICE_DRIFT');
+    fails(static function () use ($release): void {
+        StrategyEvidence::validate('EARNINGS_RELEASE','2026-11-18',utc('2026-11-18T23:00:00Z'),$release +
+            ['actual_eps'=>2.0,'consensus_eps'=>1.5,'consensus_at'=>'2026-11-18T23:01:00Z']);
+    },'INVALID_EARNINGS_CONSENSUS');
+    demand(Strategies::signal('DIVIDEND_QUALITY',$feature+['dividend_quality'=>true]) === 'SIGNAL_PASS');
+    demand(Strategies::evidenceExit('DIVIDEND_QUALITY',['dividend_quality'=>false]) === 'DIVIDEND_QUALITY_DETERIORATED');
+    demand(Strategies::signal('MACRO_ROTATION',$feature+['macro_return'=>.02,'macro_cost'=>.01]) === 'SIGNAL_PASS');
+    demand(Strategies::signal('MACRO_ROTATION',$feature+['macro_return'=>.005,'macro_cost'=>.01]) === 'STRATEGY_FILTER');
+};
+
+$cases['test_intraday_vwap_uses_later_fractional_open_and_flattens'] = static function (): void {
+    $session = Calendar::row('2026-11-19','10:00','11:30','11:35',true,'FIXTURE');
+    $open = strtotime($session['open_at'] . ' UTC');
+    $file = tempnam(sys_get_temp_dir(),'orfeu-vwap-');
+    $rows = ["symbol,isin,market,provider,event_start,event_end,available_at,received_at,open_px,high_px,low_px,close_px,volume,turnover_cents"];
+    try {
+        for ($i=0; $i<18; $i++) {
+            $start = utc('@' . ($open+300*$i));
+            $end = utc('@' . ($open+300*($i+1)));
+            $received = utc($end . ' +15 seconds');
+            $close = $i >= 5 && $i <= 8 ? 1020 : 990;
+            $volume = $i === 5 ? 30000 : 10000;
+            $openPx = $i === 7 ? 1012 : 1000;
+            $rows[] = implode(',', ['PETR3F','BRPETRACNOR9','020','FIXTURE',$start,$end,$received,$received,
+                $openPx,1025,985,$close,$volume,$volume*1000]);
+        }
+        file_put_contents($file,implode("\n",$rows) . "\n");
+        $hash = hash_file('sha256',$file);
+        $at = utc('2026-11-20T21:00:00Z');
+        $bars = IntradayReplay::load($file,$hash,'PETR3F','BRPETRACNOR9',$session,300,$at);
+        $result = IntradayReplay::simulate($bars,$session,instrument(),['session_date'=>'2026-11-24'],300);
+        demand(count($result['fills']) === 2 && $result['ledger_reconciled']);
+        demand($result['session_end_status'] === 'FLAT');
+        demand($result['fills'][0]['reference_cents'] === 1012);
+        demand($result['fills'][0]['filled_at'] === $bars[7]['open_at']);
+        demand($result['fills'][0]['filled_at'] > $result['decisions'][0]['as_of']);
+        demand($result['fills'][1]['filled_at'] < $session['continuous_end']);
+        array_pop($rows);
+        file_put_contents($file,implode("\n",$rows) . "\n");
+        fails(static function () use ($file,$session,$at): void {
+            IntradayReplay::load($file,hash_file('sha256',$file),'PETR3F','BRPETRACNOR9',$session,300,$at);
+        },'BLOCKED_INTRADAY_GAPS_OR_OUTSIDE_SESSION');
+    } finally {
+        unlink($file);
+    }
+};
+$cases['test_integer_execution_cost_and_affordability'] = static function (): void {
+    demand(ExecutionCost::price(1000,5,18,true) === 1005);
+    demand(ExecutionCost::price(1000,5,18,false) === 995);
+    demand(ExecutionCost::charge(1005,10,4,true) === ['fee'=>5,'cash'=>10055]);
+    demand(ExecutionCost::affordable(10054,1005,4) === 9);
+    fails(static function (): void { ExecutionCost::price(PHP_INT_MAX,1,18,true); },'COST_OVERFLOW');
+};
+$cases['test_risk_caps_exposure_and_scales_down_in_high_volatility'] = static function (): void {
+    [, $signal,$next,$row,$base] = scenario();
+    $limited = new PaperAccount('fixture-limited',array_replace(PaperAccount::POLICY,['max_exposure_bps'=>1]));
+    $limited->deposit(100000,$signal['open_at']);
+    demand($limited->decide('ORFEU_AI',$row,$limited->mark([]),$signal,$next,$signal['close_at'],false) ===
+        ['NO_TRADE','AGGREGATE_RISK_OR_EXPOSURE_LIMIT']);
+    $high = new PaperAccount('fixture-high',PaperAccount::POLICY);
+    $high->deposit(100000,$signal['open_at']);
+    demand($base->decide('ORFEU_AI',$row,$base->mark([]),$signal,$next,$signal['close_at'],false)[0] === 'BUY');
+    demand($high->decide('ORFEU_AI',array_replace($row,['vol20'=>1.0]),$high->mark([]),
+        $signal,$next,$signal['close_at'],false)[0] === 'BUY');
+    demand(reset($high->orders)['quantity'] < reset($base->orders)['quantity']);
+};
+
 $errors = 0;
 foreach ($cases as $name=>$test) {
     try {

@@ -31,35 +31,23 @@ final class ReadApi
         $db = $this->store->db;
         $date = Calendar::brazilDate($at);
         $session = $this->store->calendar()->get($date);
-        $seed = require ROOT . '/config/seeds.php';
-        $catalog = $this->store->instruments($date,$at);
-        $quotes = query($db, 'SELECT q.* FROM orf_quote q WHERE NOT EXISTS (SELECT 1 FROM orf_quote n
-            WHERE n.symbol=q.symbol AND (n.event_at>q.event_at OR (n.event_at=q.event_at AND n.id>q.id)))
-            ORDER BY q.symbol')->fetchAll();
+        $quotes = query($db, 'SELECT q.* FROM orf_quote q WHERE q.event_at<=? AND NOT EXISTS (SELECT 1 FROM orf_quote n
+            WHERE n.symbol=q.symbol AND n.event_at<=? AND (n.event_at>q.event_at OR (n.event_at=q.event_at AND n.id>q.id)))
+            ORDER BY q.symbol', [$at,$at])->fetchAll();
         $quotes = array_column($quotes,null,'symbol');
         $marketList = [];
-        $catalogBySymbol = array_column($catalog,null,'symbol');
-        foreach ($seed as $symbol => $name) {
-            $instrument = $catalogBySymbol[$symbol] ?? null;
-            $marketList[] = ['symbol' => $symbol,'name' => $name,'id' => $instrument['id'] ?? null,
-                'status' => 'MONITOR_ONLY','quote' => $quotes[$symbol] ?? null];
-        }
         $reviews = $this->universe($at);
-        if (($reviews['snapshot']['status'] ?? '') === 'MODELLED' || ($reviews['snapshot']['status'] ?? '') === 'DAILY_REVIEW') {
-            $marketList = [];
-            foreach ($reviews['items'] as $member) {
-                if ($member['rank_no'] !== null) {
-                    $detail = $member['details'];
-                    $marketList[] = ['id' => $member['instrument_id'],'name' => $detail['name'],'symbol' => $detail['symbol'],
-                        'status' => $member['status'],'quote' => $quotes[$detail['symbol']] ?? null] + $detail;
-                }
-            }
+        $fixed = require ROOT . '/config/fixed-universe.php';
+        foreach ($reviews['items'] as $member) {
+            $detail = $member['details'];
+            $marketList[] = ['id'=>$member['instrument_id'],'status'=>$member['status'],
+                'quote'=>$quotes[$detail['symbol']] ?? null] + $detail;
         }
         foreach ($marketList as &$row) {
             if ($row['quote']) {
                 $age = strtotime($at . ' UTC') - strtotime($row['quote']['event_at'] . ' UTC');
                 $row['quote']['age_seconds'] = $age;
-                $row['quote']['status'] = $age > 900 ? 'STALE' : 'OBSERVED';
+                $row['quote']['status'] = $age < 0 || $age > $fixed['max_quote_age_seconds'] ? 'STALE' : 'OBSERVED';
             }
         }
         unset($row);
@@ -89,21 +77,29 @@ final class ReadApi
     public function universe(string $at): array
     {
         $db = $this->store->db;
-        $snapshot = query($db, 'SELECT * FROM orf_universe_snapshot WHERE available_at<=? AND effective_at<=?
-            AND status<>"DAILY_REVIEW" ORDER BY effective_at DESC,id DESC LIMIT 1', [$at,$at])->fetch();
-        if (!$snapshot || $snapshot['status'] === 'SEED_UNVALIDATED') {
-            $seed = require ROOT . '/config/seeds.php';
-            $items = [];
-            foreach ($this->store->instruments(Calendar::brazilDate($at),$at) as $instrument) {
-                if (isset($seed[$instrument['symbol']])) {
-                    $items[] = ['instrument_id'=>$instrument['id'],'rank_no'=>null,'status'=>'MONITOR_ONLY','details'=>$instrument];
-                }
+        $fixed = require ROOT . '/config/fixed-universe.php';
+        $catalog = $this->store->instruments(Calendar::brazilDate($at),$at);
+        $coverage = query($db, 'SELECT instrument_id,COUNT(DISTINCT session_date) AS sessions FROM orf_bar
+            WHERE market=? AND available_at<=? GROUP BY instrument_id', ['010',$at])->fetchAll(\PDO::FETCH_KEY_PAIR);
+        $latest = query($db, 'SELECT * FROM orf_universe_snapshot WHERE status=? AND available_at<=?
+            ORDER BY as_of DESC,id DESC LIMIT 1', ['FIXED_REVIEW',$at])->fetch();
+        $reviews = $latest ? array_column($this->decoded(query($db, 'SELECT instrument_id,rank_no,status,payload
+            FROM orf_universe_member WHERE snapshot_id=?', [$latest['id']])->fetchAll()), null, 'instrument_id') : [];
+        $items = [];
+        foreach ($this->store->fixedWatchlist($at) as $symbol => $member) {
+            $id = $member['instrument_id'];
+            $instrument = $catalog[$id] ?? null;
+            $review = $reviews[$id] ?? [];
+            $status = 'PENDING_IDENTITY';
+            if ($instrument && $instrument['symbol'] === $symbol) {
+                $status = eligible($instrument) ? ($review['status'] ?? 'PENDING_HISTORY') : $instrument['status'];
             }
-            return ['snapshot'=>$snapshot ?: ['status'=>'SEED_UNVALIDATED','model_version'=>null],'items'=>$items];
+            $items[] = ['instrument_id'=>$id,'rank_no'=>$review['rank_no'] ?? null,'status'=>$status,
+                'details'=>$member + ['eod_sessions'=>(int) ($coverage[$id] ?? 0),'evaluated_at'=>$latest['as_of'] ?? null]
+                    + ($review['details'] ?? [])];
         }
-        return ['snapshot' => $snapshot ?: null,'items' => $snapshot
-            ? $this->decoded(query($db, 'SELECT instrument_id,rank_no,status,payload FROM orf_universe_member
-                WHERE snapshot_id=? ORDER BY rank_no IS NULL,rank_no,instrument_id', [$snapshot['id']])->fetchAll()) : []];
+        return ['snapshot'=>['status'=>'FIXED_WATCHLIST','version'=>$fixed['version'],
+            'model_version'=>$latest['model_version'] ?? null],'items'=>$items];
     }
 
     public function accounts(int $season): array
@@ -127,8 +123,10 @@ final class ReadApi
             case 'dashboard':
                 return $this->dashboard($at);
             case 'health':
+                $checkpoints = new SessionJobs($this->store);
                 return ['mode' => 'PAPER_TRADING','as_of' => $at,'data_status' => 'CONNECTED',
                     'items' => $db->query('SELECT * FROM orf_source_health')->fetchAll(),
+                    'eod_checkpoints'=>$checkpoints->installed() ? $checkpoints->latest() : [],
                     'jobs' => $db->query('SELECT job,as_of,status,detail FROM orf_job_run ORDER BY id DESC LIMIT 30')->fetchAll(),
                     'alerts' => $this->decoded($db->query('SELECT as_of,code,payload FROM orf_alert ORDER BY id DESC LIMIT 30')->fetchAll())];
             case 'universe/current':
@@ -161,14 +159,34 @@ final class ReadApi
                 $items = $db->query('SELECT id,horizon,status,trained_until,effective_at FROM orf_model_version
                     ORDER BY effective_at DESC,id' . $suffix)->fetchAll();
                 break;
+            case 'research/prediction-metrics':
+                if (!PredictionEvaluation::installed($this->store)) {
+                    return ['as_of'=>$at,'data_status'=>'UNAVAILABLE','code'=>'BLOCKED_PREDICTION_MIGRATION','items'=>[]];
+                }
+                $items = PredictionEvaluation::summary($this->store,$at,$limit,$skip);
+                break;
             default:
                 if (preg_match('~^accounts/([1-9][0-9]{0,11})/equity$~D',$route,$m)) {
                     $items = $this->decoded(query($db, 'SELECT as_of,equity_cents,status,payload FROM orf_equity_snapshot
                         WHERE account_id=? ORDER BY as_of DESC' . $suffix,[(int) $m[1]])->fetchAll());
                 } elseif (preg_match('~^instruments/([1-9][0-9]{0,11})(/predictions)?$~D',$route,$m)) {
                     if (isset($m[2])) {
-                        $items = $this->decoded(query($db,'SELECT * FROM orf_prediction WHERE instrument_id=?
-                            ORDER BY as_of DESC,id' . $suffix,[(int) $m[1]])->fetchAll());
+                        $installed = PredictionEvaluation::installed($this->store);
+                        $sql = $installed
+                            ? 'SELECT p.*,e.status evaluation_status,e.evaluated_at,e.payload evaluation_payload
+                                FROM orf_prediction p LEFT JOIN orf_prediction_evaluation e
+                                ON e.prediction_id=p.id AND e.policy=? AND e.evaluated_at<=?'
+                            : 'SELECT p.* FROM orf_prediction p';
+                        $params = $installed ? [PredictionEvaluation::POLICY,$at] : [];
+                        $items = $this->decoded(query($db,$sql . ' WHERE p.instrument_id=? AND p.as_of<=?
+                            ORDER BY p.as_of DESC,p.id' . $suffix,array_merge($params,[(int) $m[1],$at]))->fetchAll());
+                        foreach ($items as &$item) {
+                            $item['evaluation_status'] = $item['evaluation_status'] ?? 'WAITING';
+                            $item['evaluation'] = isset($item['evaluation_payload'])
+                                ? json_decode($item['evaluation_payload'],true,64,JSON_THROW_ON_ERROR) : null;
+                            unset($item['evaluation_payload']);
+                        }
+                        unset($item);
                     } else {
                         $date = Calendar::brazilDate($at);
                         $instrument = $this->store->instruments($date,$at)[(int) $m[1]] ?? null;

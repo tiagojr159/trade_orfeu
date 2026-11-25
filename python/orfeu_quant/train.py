@@ -110,7 +110,7 @@ def fit_linear(train, cal, test, cost):
     return artifact, metrics
 
 
-def fit_challenger(train, cal, test, cost):
+def fit_challenger(train, cal, test, cost, export=False):
     import numpy as np
     from lightgbm import LGBMClassifier, LGBMRegressor
     from sklearn.linear_model import LogisticRegression
@@ -121,23 +121,42 @@ def fit_challenger(train, cal, test, cost):
     x_test, g_test = matrix(test)
     params = dict(n_estimators=120, learning_rate=.03, max_depth=5, num_leaves=15,
                   min_child_samples=25, random_state=2026, n_jobs=2, verbosity=-1)
-    base = LGBMClassifier(**params).fit(x_train, g_train > cost)
-    cal_logits = base.booster_.predict(x_cal, raw_score=True).reshape(-1, 1)
-    test_logits = base.booster_.predict(x_test, raw_score=True).reshape(-1, 1)
-    calibrator = LogisticRegression(C=1).fit(cal_logits, g_cal > cost)
-    probabilities = calibrator.predict_proba(test_logits)[:, 1]
-    return_model = LGBMRegressor(**params).fit(x_train, g_train)
-    quantiles = [
-        LGBMRegressor(objective="quantile", alpha=q, **params).fit(x_train, g_train).booster_.predict(x_test)
-        for q in (.1, .5, .9)
-    ]
+    boosters, calibration, metrics = {}, {}, {}
+    for name, threshold in (("up", 0), ("profitable", cost)):
+        train_classes, cal_classes = g_train > threshold, g_cal > threshold
+        if len(np.unique(train_classes)) != 2 or len(np.unique(cal_classes)) != 2:
+            raise ValueError("CALIBRATION_CLASS_MISSING")
+        boosters[name] = LGBMClassifier(**params).fit(x_train, train_classes).booster_
+        cal_logits = boosters[name].predict(x_cal, raw_score=True).reshape(-1, 1)
+        test_logits = boosters[name].predict(x_test, raw_score=True).reshape(-1, 1)
+        calibrator = LogisticRegression(C=1).fit(cal_logits, cal_classes)
+        calibration[name] = [float(calibrator.coef_[0, 0]), float(calibrator.intercept_[0])]
+        metrics[name] = evaluate(calibrator.predict_proba(test_logits)[:, 1], g_test > threshold)
+    boosters["return"] = LGBMRegressor(**params).fit(x_train, g_train).booster_
+    quantiles = []
+    for name, q in (("q10", .1), ("q50", .5), ("q90", .9)):
+        boosters[name] = LGBMRegressor(objective="quantile", alpha=q, **params).fit(x_train, g_train).booster_
+        quantiles.append(boosters[name].predict(x_test))
     ordered = np.sort(quantiles, axis=0)
-    return {
-        "package": version("lightgbm"), "profitable": evaluate(probabilities, g_test > cost),
-        "return_mae": float(mean_absolute_error(g_test, return_model.booster_.predict(x_test))),
+    report = {
+        "package": version("lightgbm"), **metrics,
+        "return_mae": float(mean_absolute_error(g_test, boosters["return"].predict(x_test))),
         "q10_q90_coverage": float(np.mean((g_test >= ordered[0]) & (g_test <= ordered[2]))),
+        "quantile_crossing": float(np.mean((quantiles[0] > quantiles[1]) | (quantiles[1] > quantiles[2]))),
         "parameters": params,
+        "iterations": {key: booster.current_iteration() for key, booster in boosters.items()},
     }
+    if not export:
+        return report
+    artifact = {
+        "format": "ORFEU_LIGHTGBM_NATIVE_V1",
+        "runtime": report["package"],
+        "parameters": params,
+        "iterations": report["iterations"],
+        "boosters": {key: booster.model_to_string() for key, booster in boosters.items()},
+        "calibration": calibration,
+    }
+    return report, artifact
 
 
 def write_artifact(path, value):
@@ -163,11 +182,17 @@ def main():
     data, fingerprint = read_export(args.file)
     horizon = int(args.horizon[:-1])
     rows = panel(data, horizon)
+    if not rows:
+        print(json.dumps({"status": "BLOCKED_INSUFFICIENT_DATA", "reason": "NO_MATURE_LABELS", "samples": 0}))
+        return 2
+    challenger_artifact = None
     try:
         sessions = [row["session"] for row in rows]
         train, cal, test = purged_split(rows, sessions, args.holdout, horizon + 1)
         artifact, metrics = fit_linear(train, cal, test, args.cost)
-        challenger = fit_challenger(train, cal, test, args.cost) if args.challenger else None
+        challenger = None
+        if args.challenger:
+            challenger, challenger_artifact = fit_challenger(train, cal, test, args.cost, export=True)
         walk_forward = []
         if args.walk_forward_folds:
             for fold_train, fold_cal, fold_test in purged_walk_forward(
@@ -183,6 +208,9 @@ def main():
                     "test_samples": len(fold_test), "metrics": fold_metrics,
                     "challenger": fold_challenger,
                 })
+    except ModuleNotFoundError as error:
+        print(json.dumps({"status": "MODEL_RUNTIME_UNAVAILABLE", "dependency": error.name}))
+        return 2
     except ValueError as error:
         print(json.dumps({"status": "BLOCKED_INSUFFICIENT_DATA", "reason": str(error), "samples": len(rows)}))
         return 2
@@ -204,8 +232,15 @@ def main():
     stem = args.horizon + "-" + hashlib.sha256(json.dumps(run, sort_keys=True).encode()).hexdigest()[:16]
     model = args.output / (stem + ".model.json")
     report = args.output / (stem + ".research.json")
-    print(json.dumps({"status": "SHADOW", "model": str(model), "model_sha256": write_artifact(model, artifact),
-                      "report": str(report), "report_sha256": write_artifact(report, run)}))
+    result = {"status": "SHADOW", "model": str(model), "model_sha256": write_artifact(model, artifact),
+              "report": str(report), "report_sha256": write_artifact(report, run)}
+    if challenger_artifact:
+        challenger_artifact.update({key: artifact[key] for key in (
+            "horizon", "schema", "columns", "trained_until", "effective_at", "cost", "dataset_sha256", "fold")})
+        challenger_path = args.output / (stem + ".lightgbm.json")
+        result["challenger_model"] = str(challenger_path)
+        result["challenger_sha256"] = write_artifact(challenger_path, challenger_artifact)
+    print(json.dumps(result))
     return 0
 
 
