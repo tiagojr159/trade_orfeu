@@ -22,7 +22,7 @@ final class HttpFailure extends RuntimeException
 
 function https(string $url, array $headers = [], string $ca = ''): string
 {
-    $allowed = ['brapi.dev', 'api.bcb.gov.br'];
+    $allowed = ['brapi.dev', 'api.bcb.gov.br', 'newsapi.org'];
     if (!in_array(parse_url($url, PHP_URL_HOST), $allowed, true) ||
         parse_url($url, PHP_URL_SCHEME) !== 'https') {
         throw new RuntimeException('INVALID_SOURCE');

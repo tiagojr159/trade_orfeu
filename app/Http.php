@@ -135,6 +135,13 @@ final class ReadApi
                     JOIN (SELECT instrument_id,horizon,MAX(id) AS id FROM orf_prediction WHERE as_of<=? GROUP BY instrument_id,horizon) latest
                     ON latest.id=p.id ORDER BY i.symbol,p.horizon', [$at])->fetchAll();
                 return ['as_of'=>$at,'data_status'=>$rows ? 'AVAILABLE' : 'EMPTY','items'=>$this->decoded($rows)];
+            case 'news/latest':
+                if (!News::installed($this->store)) {
+                    return ['as_of'=>$at,'data_status'=>'UNAVAILABLE','code'=>'BLOCKED_NEWS_MIGRATION','items'=>[]];
+                }
+                $news = query($db,'SELECT source,symbol,title,description,url,published_at,available_at,
+                    sentiment,sentiment_label FROM orf_news WHERE available_at<=? ORDER BY published_at DESC,id DESC LIMIT 100',[$at])->fetchAll();
+                return ['as_of'=>$at,'data_status'=>$news ? 'AVAILABLE' : 'EMPTY','items'=>$news];
             case 'universe/current':
                 return ['as_of' => $at] + $this->universe($at);
             case 'universe/history':

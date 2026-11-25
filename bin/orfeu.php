@@ -36,7 +36,7 @@ try {
         throw new RuntimeException('PAPER_MODE_REQUIRED');
     }
     $commands = ['doctor','migrate','calendar:seed','calendar:import','universe:seed','universe:import',
-        'data:backfill','data:quotes','data:bcb','data:cvm','data:observations','season:create',
+        'data:backfill','data:quotes','data:bcb','data:cvm','data:observations','data:news','season:create',
         'rank:refresh','tick','reconcile','research:features','research:export','research:import','model:import','model:promote',
         'backtest','report:daily','universe:seed-fixed','universe:verify-fixed','data:coverage','calendar:sync','predictions:evaluate',
         'research:trial','research:intraday','jobs:retry-eod'];
@@ -182,6 +182,9 @@ try {
         case 'data:observations':
             $result = importObservations($store, inputFile($options), $at);
             break;
+        case 'data:news':
+            $result = News::collect($store,$config,$at,isset($options['dry-run']));
+            break;
         case 'season:create':
             $result = $store->season($options['name'] ?? 'season-001',
                 cents($options['capital'] ?? $config->get('INITIAL_CAPITAL_BRL','1000.00')), $at);
@@ -203,6 +206,9 @@ try {
             break;
         case 'tick':
             $result = $pipeline->tick($at, isset($options['dry-run']));
+            if (!isset($options['dry-run']) && $store->calendar()->marketState($at) === 'CONTINUOUS') {
+                $result['news'] = News::collect($store,$config,$at);
+            }
             if (!isset($options['dry-run']) && PredictionEvaluation::installed($store)) {
                 try {
                     $result['prediction_evaluation'] = PredictionEvaluation::run($store,$at,100);

@@ -200,7 +200,8 @@ function render(data) {
 async function loadPanels(signal) {
   const panels = await Promise.allSettled([
     api('matrix?limit=160', signal), api('orders', signal), api('trades', signal),
-    api('research/runs', signal), api('research/models', signal), api('health', signal), api('predictions/latest', signal)
+    api('research/runs', signal), api('research/models', signal), api('health', signal),
+    api('predictions/latest', signal), api('news/latest', signal)
   ]);
   const received = (index) => panels[index].status === 'fulfilled' ? panels[index].value : {};
   const matrix = received(0).items ?? [];
@@ -214,6 +215,40 @@ async function loadPanels(signal) {
     pct(row.details.mu_gross), String(row.model_version || '').slice(0, 12), dateTime(row.as_of)
   ])));
   byId('predictions-empty').hidden = predictions.length > 0;
+  const news = received(7);
+  set('news-status', news.data_status === 'AVAILABLE' ? news.items.length + ' notícias' :
+    (news.code === 'BLOCKED_NEWS_MIGRATION' ? 'Atualização de banco necessária' : 'Sem notícias coletadas'));
+  const newsBox = byId('news-data');
+  newsBox.replaceChildren(...(news.items ?? []).map((item) => {
+    const article = document.createElement('article');
+    article.className = 'news-item';
+    const heading = document.createElement('h3');
+    const link = document.createElement('a');
+    link.href = item.url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = item.title;
+    heading.append(link);
+    const meta = document.createElement('p');
+    meta.className = 'muted';
+    meta.textContent = [item.source, item.symbol || 'Mercado', dateTime(item.published_at),
+      'Sentimento ' + item.sentiment_label + ' (' + pct(Number(item.sentiment)) + ')'].join(' · ');
+    article.append(heading, meta);
+    if (item.description) {
+      const description = document.createElement('p');
+      description.textContent = item.description;
+      article.append(description);
+    }
+    return article;
+  }));
+  if (!(news.items ?? []).length) {
+    const message = document.createElement('p');
+    message.className = 'muted';
+    message.textContent = news.code === 'BLOCKED_NEWS_MIGRATION'
+      ? 'Aplique a atualização do pacote para criar o armazenamento de notícias.'
+      : 'Sem manchetes disponíveis. Configure NEWS_API_KEY no .env privado; o uso em produção requer plano autorizado.';
+    newsBox.append(message);
+  }
   const heading = ['Estratégia', ...Array.from(byId('markets').rows).map((row) => row.cells[0].textContent)];
   const grid = document.createElement('table');
   const matrixBody = document.createElement('tbody');

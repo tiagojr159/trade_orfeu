@@ -168,6 +168,6 @@ function cents(string $value): int
 }
 
 foreach (['Market', 'Sources', 'Quant', 'StrategyTrial', 'StrategyEvidence', 'ExecutionCost', 'Trading', 'Store', 'SessionJobs', 'Pipeline',
-    'Research', 'Prediction', 'Replay', 'Intraday', 'Admin', 'Http'] as $module) {
+    'Research', 'Prediction', 'Replay', 'Intraday', 'Admin', 'News', 'Http'] as $module) {
     require_once __DIR__ . '/' . $module . '.php';
 }

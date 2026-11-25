@@ -19,8 +19,8 @@ if (!defined('Orfeu\\ROOT')) {
     <nav aria-label="Seções">
       <a href="#visao">Visão geral</a>
       <a href="#universo">Universo B3</a>
-      <a href="#previsoes">PrevisÃµes</a>
-      <a href="#noticias">NotÃ­cias</a>
+      <a href="#previsoes">Previsões</a>
+      <a href="#noticias">Notícias</a>
       <a href="#torneio">Torneio</a>
       <a href="#matriz">Matriz de decisões</a>
       <a href="#negocios">Ordens e negócios</a>
@@ -48,12 +48,13 @@ if (!defined('Orfeu\\ROOT')) {
       <div class="table-wrap"><table><thead><tr><th>Ação</th><th>Empresa</th><th>Preço</th><th>Horário da cotação</th><th>Prob. de lucro</th><th>Estado</th></tr></thead><tbody id="markets"></tbody></table></div>
       <div id="instrument-detail" class="details" hidden></div>
     </section>
-    <section id="previsoes" class="panel"><div class="panel-title"><h2>PrevisÃ£o de mercado</h2><span class="muted">Probabilidades do Ãºltimo modelo disponÃ­vel</span></div>
-      <div class="table-wrap"><table><thead><tr><th>AÃ§Ã£o</th><th>Horizonte</th><th>Prob. de alta</th><th>Prob. de queda</th><th>Retorno estimado</th><th>Modelo</th><th>Gerada em</th></tr></thead><tbody id="prediction-rows"></tbody></table></div>
-      <p id="predictions-empty" class="muted">Sem previsÃµes registradas. O sistema nÃ£o inventa probabilidades quando faltam histÃ³rico e modelo validado.</p>
+    <section id="previsoes" class="panel"><div class="panel-title"><h2>Previsões de mercado</h2><span class="muted">Probabilidades do último modelo disponível</span></div>
+      <p class="details">A probabilidade de queda é o complemento da probabilidade de alta. O resultado depende de histórico EOD e modelo disponível; não é garantia de retorno.</p>
+      <div class="table-wrap"><table><thead><tr><th>Ação</th><th>Horizonte</th><th>Prob. de alta</th><th>Prob. de queda</th><th>Retorno bruto estimado</th><th>Modelo</th><th>Gerada em</th></tr></thead><tbody id="prediction-rows"></tbody></table></div>
+      <p id="predictions-empty" class="details muted">Sem previsões registradas. São necessários histórico diário importado e modelo compatível.</p>
     </section>
-    <section id="noticias" class="panel"><div class="panel-title"><h2>NotÃ­cias</h2><span class="muted">Fonte e anÃ¡lise de sentimento</span></div>
-      <div id="news-data" class="details">A integraÃ§Ã£o de notÃ­cias do Prometheus Ã© voltada a criptoativos; ainda nÃ£o hÃ¡ uma fonte de notÃ­cias B3 conectada ao ORFEU.</div>
+    <section id="noticias" class="panel"><div class="panel-title"><h2>Notícias da B3</h2><span id="news-status" class="muted">Carregando</span></div>
+      <div id="news-data" class="news-list details"></div>
     </section>
     <section id="torneio" class="panel"><div class="panel-title"><h2>Torneio de estratégias</h2><span class="muted" id="season"></span></div>
       <div class="table-wrap"><table><thead><tr><th>Estratégia</th><th>Patrimônio</th><th>Caixa disponível</th><th>Realizado</th><th>Não realizado</th><th>Taxas</th></tr></thead><tbody id="strategy-rows"></tbody></table></div>
