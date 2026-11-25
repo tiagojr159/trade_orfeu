@@ -248,6 +248,20 @@ async function loadPanels(signal) {
         RUNNING: 'Em processamento', DEAD: 'Requer revisão'}[job.status] ?? job.status)),
     ...(health.jobs ?? []).slice(0,5).map((job) => job.job + ' · ' + job.status + ' · ' + job.detail),
     ...(health.alerts ?? []).map((alert) => alert.code + ' · ' + dateTime(alert.as_of))], 'Aguardando registros de coleta.');
+  const events = [
+    ...(health.items ?? []).map((row) => ({at: row.last_attempt, origin: row.source, state: row.status,
+      detail: row.detail || (row.last_success ? 'Última coleta concluída em ' + dateTime(row.last_success) : 'Ainda sem coleta concluída')})),
+    ...(health.jobs ?? []).map((row) => ({at: row.as_of, origin: row.job, state: row.status, detail: row.detail})),
+    ...(health.eod_checkpoints ?? []).map((row) => ({at: row.updated_at || row.started_at, origin: 'EOD · ' + row.session_date,
+      state: row.status, detail: row.last_error || row.result || ''})),
+    ...(health.alerts ?? []).map((row) => ({at: row.as_of, origin: 'Alerta', state: row.code,
+      detail: row.details?.message || row.details?.reason || row.code}))
+  ].sort((a, b) => String(b.at || '').localeCompare(String(a.at || ''))).slice(0, 100);
+  const logRows = byId('log-rows');
+  logRows.replaceChildren(...events.map((event) => cellRow([
+    dateTime(event.at), event.origin || 'Sistema', event.state || '—', event.detail || '—'
+  ])));
+  byId('logs-empty').hidden = events.length > 0;
 }
 
 let dashboardInstruments = [];

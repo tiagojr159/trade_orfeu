@@ -24,6 +24,7 @@ if (!defined('Orfeu\\ROOT')) {
       <a href="#negocios">Ordens e negócios</a>
       <a href="#laboratorio">Laboratório</a>
       <a href="#fontes">Monitoramento</a>
+      <a href="#logs">Logs</a>
     </nav>
     <div class="sidebar-foot"><span class="dot"></span> Negociação virtual</div>
   </aside>
@@ -52,6 +53,10 @@ if (!defined('Orfeu\\ROOT')) {
     <section id="negocios" class="panel"><div class="panel-title"><h2>Ordens e negócios</h2><button type="button" id="export-trades">Exportar página CSV</button></div><div id="trade-data" class="details"></div></section>
     <section id="laboratorio" class="panel"><div class="panel-title"><h2>Laboratório</h2></div><div id="research-data" class="details"></div></section>
     <section id="fontes" class="panel"><div class="panel-title"><h2>Monitoramento</h2></div><div id="health-data" class="details"></div></section>
+    <section id="logs" class="panel"><div class="panel-title"><h2>Logs de execução</h2><span class="muted">Atualiza junto com o painel</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Horário</th><th>Origem</th><th>Estado</th><th>Detalhe</th></tr></thead><tbody id="log-rows"></tbody></table></div>
+      <p id="logs-empty" class="muted" hidden>Nenhum evento de coleta ou execução registrado.</p>
+    </section>
   </main>
 </body>
 </html>
