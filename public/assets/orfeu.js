@@ -200,7 +200,7 @@ function render(data) {
 async function loadPanels(signal) {
   const panels = await Promise.allSettled([
     api('matrix?limit=160', signal), api('orders', signal), api('trades', signal),
-    api('research/runs', signal), api('research/models', signal), api('health', signal)
+    api('research/runs', signal), api('research/models', signal), api('health', signal), api('predictions/latest', signal)
   ]);
   const received = (index) => panels[index].status === 'fulfilled' ? panels[index].value : {};
   const matrix = received(0).items ?? [];
@@ -208,6 +208,12 @@ async function loadPanels(signal) {
   tradeRows = received(2).items ?? tradeRows;
   const models = received(4).items ?? [];
   const health = received(5);
+  const predictions = received(6).items ?? [];
+  byId('prediction-rows').replaceChildren(...predictions.map((row) => cellRow([
+    row.symbol, row.horizon, pct(row.details.p_up), pct(1 - row.details.p_up),
+    pct(row.details.mu_gross), String(row.model_version || '').slice(0, 12), dateTime(row.as_of)
+  ])));
+  byId('predictions-empty').hidden = predictions.length > 0;
   const heading = ['Estratégia', ...Array.from(byId('markets').rows).map((row) => row.cells[0].textContent)];
   const grid = document.createElement('table');
   const matrixBody = document.createElement('tbody');

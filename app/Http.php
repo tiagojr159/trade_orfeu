@@ -129,6 +129,12 @@ final class ReadApi
                     'eod_checkpoints'=>$checkpoints->installed() ? $checkpoints->latest() : [],
                     'jobs' => $db->query('SELECT job,as_of,status,detail FROM orf_job_run ORDER BY id DESC LIMIT 30')->fetchAll(),
                     'alerts' => $this->decoded($db->query('SELECT as_of,code,payload FROM orf_alert ORDER BY id DESC LIMIT 30')->fetchAll())];
+            case 'predictions/latest':
+                $rows = query($db, 'SELECT p.id,p.instrument_id,i.symbol,p.as_of,p.target_end,p.horizon,p.model_version,p.payload
+                    FROM orf_prediction p JOIN orf_instrument i ON i.id=p.instrument_id
+                    JOIN (SELECT instrument_id,horizon,MAX(id) AS id FROM orf_prediction WHERE as_of<=? GROUP BY instrument_id,horizon) latest
+                    ON latest.id=p.id ORDER BY i.symbol,p.horizon', [$at])->fetchAll();
+                return ['as_of'=>$at,'data_status'=>$rows ? 'AVAILABLE' : 'EMPTY','items'=>$this->decoded($rows)];
             case 'universe/current':
                 return ['as_of' => $at] + $this->universe($at);
             case 'universe/history':
