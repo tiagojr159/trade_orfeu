@@ -1,0 +1,15 @@
+{
+  "name": "orfeu/quant",
+  "require": {
+    "php": ">=7.4",
+    "ext-pdo": "*",
+    "ext-pdo_mysql": "*",
+    "ext-curl": "*",
+    "ext-zip": "*",
+    "ext-mbstring": "*",
+    "ext-openssl": "*"
+  },
+  "scripts": {
+    "test": "@php tests/run.php"
+  }
+}

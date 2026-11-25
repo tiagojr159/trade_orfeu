@@ -1,0 +1,51 @@
+CREATE TABLE orf_season (
+ id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, name VARCHAR(80) NOT NULL UNIQUE,
+ starts_at DATETIME(6) NOT NULL, initial_cents BIGINT NOT NULL, policy LONGTEXT NOT NULL,
+ paused TINYINT NOT NULL DEFAULT 0
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE orf_account (
+ id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, season_id BIGINT UNSIGNED NOT NULL,
+ strategy_key VARCHAR(40) NOT NULL, strategy_version VARCHAR(16) NOT NULL, state LONGTEXT NOT NULL,
+ UNIQUE(season_id,strategy_key), FOREIGN KEY(season_id) REFERENCES orf_season(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE orf_ledger_entry (
+ id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, account_id BIGINT UNSIGNED NOT NULL,
+ event_key CHAR(64) NOT NULL, event_at DATETIME(6) NOT NULL, kind VARCHAR(24) NOT NULL,
+ cash_delta BIGINT NOT NULL, payable_delta BIGINT NOT NULL, receivable_delta BIGINT NOT NULL,
+ position_cost_delta BIGINT NOT NULL, reserve_delta BIGINT NOT NULL, pnl_delta BIGINT NOT NULL,
+ payload LONGTEXT NOT NULL, UNIQUE(account_id,event_key), INDEX(account_id,event_at),
+ FOREIGN KEY(account_id) REFERENCES orf_account(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE orf_order (
+ id CHAR(64) PRIMARY KEY, account_id BIGINT UNSIGNED NOT NULL, instrument_id BIGINT UNSIGNED NOT NULL,
+ decision_at DATETIME(6) NOT NULL, eligible_at DATETIME(6) NOT NULL, status VARCHAR(24) NOT NULL,
+ payload LONGTEXT NOT NULL, INDEX(account_id,decision_at), INDEX(status,eligible_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE orf_fill (
+ id CHAR(64) PRIMARY KEY, order_id CHAR(64) NOT NULL, filled_at DATETIME(6) NOT NULL,
+ settlement_date DATE NOT NULL, payload LONGTEXT NOT NULL,
+ INDEX(filled_at), FOREIGN KEY(order_id) REFERENCES orf_order(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE orf_equity_snapshot (
+ account_id BIGINT UNSIGNED NOT NULL, as_of DATETIME(6) NOT NULL, equity_cents BIGINT NULL,
+ status VARCHAR(24) NOT NULL, payload LONGTEXT NOT NULL,
+ PRIMARY KEY(account_id,as_of), FOREIGN KEY(account_id) REFERENCES orf_account(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE orf_decision (
+ account_id BIGINT UNSIGNED NOT NULL, instrument_id BIGINT UNSIGNED NOT NULL, as_of DATETIME(6) NOT NULL,
+ action VARCHAR(12) NOT NULL, reason VARCHAR(80) NOT NULL, payload LONGTEXT NOT NULL,
+ PRIMARY KEY(account_id,instrument_id,as_of), INDEX(as_of)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE orf_job_run (
+ id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, job VARCHAR(40) NOT NULL,
+ as_of DATETIME(6) NOT NULL, status VARCHAR(32) NOT NULL, detail VARCHAR(100) NOT NULL,
+ INDEX(job,as_of)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE orf_alert (
+ id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, as_of DATETIME(6) NOT NULL,
+ code VARCHAR(60) NOT NULL, payload LONGTEXT NOT NULL, INDEX(as_of)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE orf_admin_audit (
+ id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, as_of DATETIME(6) NOT NULL,
+ action VARCHAR(60) NOT NULL, payload LONGTEXT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

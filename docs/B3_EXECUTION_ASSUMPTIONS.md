@@ -1,0 +1,13 @@
+# Hipóteses de execução
+
+O simulador usa `EOD_NEXT_OPEN_V1`, com decisão depois que o fechamento é conhecido e primeira janela na abertura da sessão posterior. O preço observado pode incluir a formação de abertura. Esse é um modelo diário aproximado. Apenas dados oficiais de abertura do mercado correspondente são usados pelos jobs. As cotações da brapi são informativas.
+
+Ações à vista ON/PN precisam de cadastro verificado. Preços brutos de lote padrão (010) e fracionário (020) ficam separados. O lote fracionário usa inteiros e preço próprio. Ordens apresentam validade de uma sessão. A capacidade usa ADV já observado até a decisão e o restante é encerrado como `PARTIAL_EXPIRED`. A simulação de participação de volume não representa profundidade da fila.
+
+Hipóteses de custo iniciais por lado em pontos-base. Penalidade de 8 para lote padrão, 18 para fracionário e 4 de taxas. O preço é arredondado ao tick desfavorável e a taxa é arredondada ao centavo superior. Esses valores são parâmetros de pesquisa e precisam ser confrontados com a tabela aplicável antes de promoção. [Tarifas de renda variável B3](https://b3.com.br/pt_br/produtos-e-servicos/tarifas/listados-a-vista-e-derivativos/renda-variavel/tarifas-de-acoes-e-fundos-de-investimento/).
+
+Aberturas respeitam o calendário, incluindo feriados e grade especial. A liquidação de ações usa D+2 em dias de liquidação, com caixa pendente separado do caixa disponível. Equidade econômica soma caixa, créditos e marcação a mercado e deduz obrigações. Reservas restringem poder de compra. Marcação sem preço atual fica `STALE`. [Calendário B3](https://www.b3.com.br/pt_br/noticias/calendario-de-negociacao-da-b3-confira-o-funcionamento-da-bolsa-em-2026.htm) · [Liquidação D+2](https://www.b3.com.br/pt_br/noticias/liquidacao.htm).
+
+Risco inicial por conta de até quatro posições, 30% por ativo, 40% por setor, 1% de risco estimado por ordem e buffer de caixa de 5%. Drawdown a partir de 10% e perda diária a partir de 3% pausam compras na avaliação. Stop observado no fechamento gera intenção para a abertura posterior. Desdobramentos inteiros alteram unidades e preço-base e preservam o custo. Dividendos criam crédito na data de aquisição do direito e passam a caixa apenas na data de pagamento e na rotina aplicável.
+
+Cobertura atual do motor EOD inclui ordens a mercado, expiração e revalidação de compra/venda inteira. Ainda faltam ordens limite com fila, disparos intradiários e ambiguidade intrabar, frações de eventos societários, fusões, OPA/delistagem com conversão do estoque, cálculo de IR/JCP e spread observado. As estimativas são pré-IR.
