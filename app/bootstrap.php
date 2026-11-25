@@ -14,6 +14,7 @@ const ROOT = __DIR__ . '/..';
 final class Config
 {
     private $values;
+    private $hostgatorInferred = false;
 
     public function __construct(?array $values = null)
     {
@@ -27,6 +28,14 @@ final class Config
         $this->values = $values;
         if ($this->get('PAPER_TRADING_ONLY', 'true') !== 'true') {
             throw new RuntimeException('PAPER_MODE_REQUIRED');
+        }
+        $configuredEnvironment = getenv('APP_ENV');
+        if ($configuredEnvironment === false) {
+            $configuredEnvironment = $values['APP_ENV'] ?? 'local';
+        }
+        if ($configuredEnvironment === 'local' &&
+            preg_match('/^[a-zA-Z0-9]{1,24}_orfeu$/D', $this->get('DB_DATABASE'))) {
+            $this->hostgatorInferred = true;
         }
         $environment = $this->get('APP_ENV', 'local');
         $database = $this->get('DB_DATABASE', 'orfeu');
@@ -44,6 +53,9 @@ final class Config
 
     public function get(string $key, string $default = ''): string
     {
+        if ($key === 'APP_ENV' && $this->hostgatorInferred) {
+            return 'hostgator';
+        }
         $value = getenv($key);
         return $value === false ? (string) ($this->values[$key] ?? $default) : $value;
     }
