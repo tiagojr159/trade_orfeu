@@ -25,6 +25,16 @@ $route = preg_replace('~^index\.php(?:/|$)~', '', $route);
 $api = strpos($route,'api/v1/') === 0;
 try {
     $config = new Config();
+    if ($config->get('APP_ENV') === 'hostgator') {
+        $setupDb = $config->connect();
+        if (!$setupDb->query('SHOW FULL TABLES')->fetch()) {
+            $setupStore = new Store($setupDb);
+            $setupStore->migrate(false);
+            $setupStore->importCalendar(Calendar::official2026());
+            $setupStore->catalog(ROOT . '/config/seed-catalog.csv');
+            $setupStore->season('season-001', cents($config->get('INITIAL_CAPITAL_BRL', '1000.00')), utc());
+        }
+    }
     if ($config->get('ALLOW_LOCAL_ROOT') === 'true' &&
         !in_array($_SERVER['REMOTE_ADDR'] ?? '', ['127.0.0.1','::1'], true)) {
         http_response_code(403);
