@@ -152,6 +152,78 @@ final class Store
             ORDER BY i.id', [$date, $cutoff, $date, $cutoff, $date, $cutoff, $date, $cutoff])->fetchAll(), null, 'id');
     }
 
+    public function fundamentalQuality(array $instruments, string $date, string $asOf): array
+    {
+        $codes = array_values(array_unique(array_filter(array_map(static function (array $instrument) {
+            return isset($instrument['cvm_code']) && ctype_digit((string) $instrument['cvm_code'])
+                ? (string) $instrument['cvm_code'] : null;
+        }, $instruments))));
+        if (!$codes) {
+            return [];
+        }
+        $subjects = [];
+        foreach ($codes as $code) {
+            foreach (['3.01', '3.05', '3.09'] as $account) {
+                $subjects[] = $code . ':itr:DRE:' . $account;
+            }
+        }
+        $placeholders = implode(',', array_fill(0, count($subjects), '?'));
+        $params = array_merge($subjects, [$date, $asOf]);
+        $rows = query($this->db, 'SELECT subject,available_at,payload FROM orf_observation
+            WHERE kind="FUNDAMENTAL" AND subject IN (' . $placeholders . ') AND ref_date<=? AND available_at<=?
+            ORDER BY available_at,id', $params)->fetchAll();
+        $periods = [];
+        foreach ($rows as $row) {
+            $payload = json_decode($row['payload'], true, 64, JSON_THROW_ON_ERROR);
+            $parts = explode(':', $row['subject']);
+            $account = end($parts);
+            if (!in_array($account, ['3.01', '3.05', '3.09'], true) ||
+                empty($payload['period_start']) || empty($payload['period_end']) ||
+                !is_int($payload['brl_cents'] ?? null)) {
+                continue;
+            }
+            $code = $parts[0];
+            $periods[$code][$payload['period_end']][$account] = [
+                'value' => $payload['brl_cents'], 'start' => $payload['period_start'],
+                'available_at' => $row['available_at'], 'description' => $payload['description'] ?? '',
+            ];
+        }
+        $out = [];
+        foreach ($periods as $code => $byDate) {
+            krsort($byDate);
+            foreach ($byDate as $end => $accounts) {
+                if (!isset($accounts['3.01'], $accounts['3.05'], $accounts['3.09'])) {
+                    continue;
+                }
+                $revenue = $accounts['3.01'];
+                $ebit = $accounts['3.05'];
+                $profit = $accounts['3.09'];
+                if ($revenue['value'] <= 0 || $revenue['start'] !== $ebit['start'] ||
+                    $revenue['start'] !== $profit['start'] || $revenue['description'] === '' ||
+                    $profit['description'] === '') {
+                    continue;
+                }
+                $days = (int) (new \DateTimeImmutable($revenue['start']))
+                    ->diff(new \DateTimeImmutable($end))->days;
+                $age = (int) (new \DateTimeImmutable($end))->diff(new \DateTimeImmutable($date))->days;
+                $profitDescription = strtolower($profit['description']);
+                if ($days < 70 || $days > 110 || $age > 180 ||
+                    strpos(strtolower($revenue['description']), 'receita') === false ||
+                    (strpos($profitDescription, 'resultado') === false && strpos($profitDescription, 'lucro') === false)) {
+                    continue;
+                }
+                $out[$code] = [
+                    'net_margin' => $profit['value'] / $revenue['value'],
+                    'ebit_margin' => $ebit['value'] / $revenue['value'],
+                    'financial_period_end' => $end,
+                    'financial_available_at' => max($revenue['available_at'], $ebit['available_at'], $profit['available_at']),
+                ];
+                break;
+            }
+        }
+        return $out;
+    }
+
     public function bars(int $id, string $asOf, string $date, string $market = '010'): array
     {
         return query($this->db, 'SELECT b.* FROM orf_bar b WHERE b.instrument_id=? AND b.market=?

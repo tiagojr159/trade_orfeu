@@ -134,6 +134,13 @@ final class Replay
             $growth = 1.0;
             $cdiCount = 0;
             $excess = [];
+            $dailyReturns = [];
+            foreach (array_slice($curve, 1) as $entry) {
+                if ($entry['status'] === 'AVAILABLE' && $entry['daily_return'] !== null &&
+                    is_finite((float) $entry['daily_return'])) {
+                    $dailyReturns[] = (float) $entry['daily_return'];
+                }
+            }
             foreach (array_slice($curve,1) as $entry) {
                 $cdi = $cdiRows[$entry['date']]['value'] ?? null;
                 if ($cdi !== null && $entry['status'] === 'AVAILABLE') {
@@ -148,12 +155,27 @@ final class Replay
             foreach ($excess as $item) {
                 $variance += ($item - $mean) ** 2;
             }
+            $returnMean = $dailyReturns ? array_sum($dailyReturns) / count($dailyReturns) : 0.0;
+            $returnVariance = 0.0;
+            foreach ($dailyReturns as $item) {
+                $returnVariance += ($item - $returnMean) ** 2;
+            }
+            $dailyVolatility = count($dailyReturns) > 1
+                ? sqrt($returnVariance / (count($dailyReturns) - 1)) : 0.0;
+            $maxDrawdown = min(array_column(array_slice($curve, 1), 'drawdown'));
+            $annualizedReturn = $processed > 0 && count($dailyReturns) === $processed && $last['equity_cents'] > 0
+                ? ($last['equity_cents'] / $capital) ** (252 / $processed) - 1 : null;
             $startDate = $curve[1]['date'];
             $start = $ibovRows[$startDate]['value'] ?? null;
             $end = $ibovRows[$last['date']]['value'] ?? null;
             $result['strategy_results'][$key] = $counts[$key] + [
                 'equity_cents'=>$last['equity_cents'],'total_return'=>$last['equity_cents'] / $capital - 1,
-                'max_drawdown'=>min(array_column(array_slice($curve,1),'drawdown')),
+                'annualized_return'=>$annualizedReturn,
+                'annualized_volatility'=>$dailyVolatility * sqrt(252),
+                'return_observations'=>count($dailyReturns),
+                'calmar'=>$annualizedReturn !== null && $maxDrawdown < 0
+                    ? $annualizedReturn / abs($maxDrawdown) : null,
+                'max_drawdown'=>$maxDrawdown,
                 'fees_cents'=>$last['fees_cents'],'realized_cents'=>$last['realized_cents'],
                 'unrealized_cents'=>$last['unrealized_cents'],'cdi_total'=>$cdiCount === $processed ? $growth - 1 : null,
                 'cdi_coverage'=>$cdiCount / $processed,'ibov_close_to_close'=>$start && $end ? $end / $start - 1 : null,

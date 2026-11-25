@@ -11,7 +11,7 @@ final class Strategies
         'ORFEU_AI' => 'Ensemble preditivo', 'MULTIHORIZON' => 'Consenso de horizontes',
         'MOMENTUM' => 'Tendência EMA', 'RELATIVE_STRENGTH' => 'Força transversal',
         'MEAN_REVERSION' => 'Reversão à média', 'BREAKOUT' => 'Donchian e volume',
-        'VWAP_RECLAIM' => 'Recuperação do VWAP', 'QUALITY_VALUE' => 'Qualidade e valor',
+        'VWAP_RECLAIM' => 'Recuperação do VWAP', 'QUALITY_VALUE' => 'Qualidade operacional CVM',
         'EARNINGS_DRIFT' => 'Pós-resultado', 'LOW_VOL' => 'Baixa volatilidade',
         'ADAPTIVE_REGIME' => 'Regime adaptativo', 'DIVIDEND_QUALITY' => 'Dividendos sustentáveis',
         'MACRO_ROTATION' => 'Rotação macro', 'PORTFOLIO_ROTATION' => 'Rotação de carteira',
@@ -59,7 +59,11 @@ final class Strategies
             case 'VWAP_RECLAIM':
                 return 'MISSING_INTRADAY';
             case 'QUALITY_VALUE':
-                return 'MISSING_SECTOR_FUNDAMENTALS';
+                if (($f['fundamental_status'] ?? '') !== 'AVAILABLE') {
+                    return 'MISSING_OR_STALE_FUNDAMENTALS';
+                }
+                $active = $f['net_margin'] > 0 && $f['ebit_margin'] > 0;
+                break;
             case 'EARNINGS_DRIFT':
                 return 'MISSING_PUBLISHED_CONSENSUS';
             case 'DIVIDEND_QUALITY':

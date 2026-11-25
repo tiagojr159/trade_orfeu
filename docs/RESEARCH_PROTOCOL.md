@@ -9,7 +9,7 @@ Defina universo histórico, custo, calendário, horizonte e data do holdout ante
 5. Confira o SHA-256 e carregue os artefatos. Copie arquivos para uma pasta privada se for hospedar o dashboard longe do laboratório. O registro usa JSON de vetores e recebe o estado `SHADOW`. As rotinas web e o Cron PHP não executam Python.
 
 ```powershell
-& .venv/Scripts/python.exe -m orfeu_quant.train --file=storage/exports/<hash>.jsonl --horizon=5D --holdout=AAAA-MM-DD --challenger
+& .venv/Scripts/python.exe -m orfeu_quant.train --file=storage/exports/<hash>.jsonl --horizon=5D --holdout=AAAA-MM-DD --walk-forward-folds=3 --challenger
 & $php bin/orfeu.php model:import --file=storage/models/<arquivo>.model.json --sha256=<sha256>
 & $php bin/orfeu.php research:import --file=storage/models/<arquivo>.research.json --sha256=<sha256>
 & $php bin/orfeu.php backtest --from=AAAA-MM-DD --to=AAAA-MM-DD --cost-multiplier=2
@@ -19,4 +19,6 @@ O replay usa a mesma execução diária, custos e contabilidade que o torneio, s
 
 A promoção manual exige relatório revisado `ORFEU_PROMOTION_V1` associado ao hash do modelo e do dataset, sem vazamento temporal, universo histórico, livro reconciliado e blocos OOS e prospectivo. Esse documento deve ser montado a partir de avaliações reais. O gate verifica janela, cobertura, amostra, comparativos com baseline e CDI, drawdown e custos 2x. Ele não certifica a autenticidade de métricas fornecidas por um operador. Execute `model:promote --model=<sha256> --evidence=<sha256>` apenas após a revisão. O instante da promoção é append-only.
 
-Ficam pendentes ciclos completos de walk-forward, ablation, calibração prospectiva, análise de IC e drift, estimação de confiança de desempenho do portfólio, retorno total causal com proventos, fábrica DSL e meta-label. A seleção inicial segue como seed até que exista evidência de mercado.
+O treinador suporta três ou mais folds walk-forward purgados, com janelas de teste anteriores e disjuntas em relação ao holdout final. Quando ativado, o LightGBM challenger é avaliado nas mesmas janelas do baseline linear. O artefato de pesquisa guarda métricas por fold e médias/desvios entre folds; isso descreve estabilidade histórica e não substitui validação prospectiva. A execução de folds com dados reais continua pendente da importação de histórico B3 e cobertura societária point-in-time. Também faltam ablation, calibração prospectiva, análise de IC e drift, estimação de confiança de desempenho do portfólio, retorno total causal com proventos, fábrica DSL e meta-label. A seleção inicial segue como seed até que exista evidência de mercado.
+
+O filtro de qualidade operacional usa margens trimestrais da DRE consolidada CVM (contas 3.01, 3.05 e 3.09), com o período e a disponibilidade preservados. Ele rejeita períodos acima de 180 dias e exige receita e resultado positivos para a conta especializada. Isso não é valuation, não é comparável entre setores por padrão e não é evidência suficiente para promover modelo ou seleção.

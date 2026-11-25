@@ -1,3 +1,5 @@
 Options -Indexes
 RewriteEngine On
+RewriteRule ^$ /trade_orfeu/public/ [R=302,L]
 RewriteRule ^(?!public(?:/|$)).* - [F,L]
+

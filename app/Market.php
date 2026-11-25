@@ -27,15 +27,14 @@ final class Calendar
         bool $settles, string $source): array
     {
         day($date);
-        if ($open !== null || $end !== null || $close !== null) {
-            foreach ([$open, $end, $close] as $time) {
-                if ($time === null || !preg_match('/^(?:[01]\d|2[0-3]):[0-5]\d$/D', $time)) {
-                    throw new RuntimeException('INVALID_SESSION');
-                }
-            }
-            if (!($open < $end && $end <= $close)) {
+        foreach ([$open, $end, $close] as $time) {
+            if ($time !== null && !preg_match('/^(?:[01]\d|2[0-3]):[0-5]\d$/D', $time)) {
                 throw new RuntimeException('INVALID_SESSION');
             }
+        }
+        if (($open === null) !== ($end === null) || ($end === null) !== ($close === null) ||
+            ($open !== null && !($open < $end && $end <= $close))) {
+            throw new RuntimeException('INVALID_SESSION');
         }
         $convert = static function (?string $time) use ($date): ?string {
             if ($time === null) {
@@ -62,21 +61,18 @@ final class Calendar
         }));
     }
 
-    public function marketState(string $asOf): string
+    public function marketState(string $at): string
     {
-        $row = $this->get(self::brazilDate($asOf));
+        $row = $this->get(self::brazilDate($at));
         if (!$row) {
             return 'CALENDAR_MISSING';
         }
-        return $row['open_at'] !== null && $asOf >= $row['open_at'] && $asOf < $row['continuous_end']
+        return $row['open_at'] !== null && $at >= $row['open_at'] && $at < $row['continuous_end']
             ? 'CONTINUOUS' : 'CLOSED';
     }
 
     public function next(string $date, int $count = 1, bool $settlement = false): ?array
     {
-        if ($count < 1) {
-            throw new RuntimeException('INVALID_OFFSET');
-        }
         return $this->walk($date, $count, '+1 day', $settlement);
     }
 
@@ -87,6 +83,9 @@ final class Calendar
 
     private function walk(string $date, int $count, string $step, bool $settlement): ?array
     {
+        if ($count < 1) {
+            throw new RuntimeException('INVALID_OFFSET');
+        }
         $cursor = new DateTimeImmutable($date, new DateTimeZone('UTC'));
         while (true) {
             $cursor = $cursor->modify($step);

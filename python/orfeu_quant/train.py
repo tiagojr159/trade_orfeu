@@ -1,11 +1,13 @@
 import argparse
 import hashlib
 import json
+import math
+from statistics import mean, stdev
 from importlib.metadata import version
 from pathlib import Path
 
 from .data import COLUMNS, SCHEMA, panel, read_export
-from .splits import purged_split
+from .splits import purged_split, purged_walk_forward
 
 
 def evaluate(prob, realized):
@@ -25,6 +27,31 @@ def matrix(rows):
     if not np.isfinite(features).all() or not np.isfinite(gross).all():
         raise ValueError("NONFINITE_INPUT")
     return features, gross
+
+
+def summarize_walk_forward(folds):
+    values = {}
+
+    def collect(prefix, item):
+        if isinstance(item, dict):
+            for key, value in item.items():
+                collect(prefix + "." + key if prefix else key, value)
+        elif isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(item):
+            values.setdefault(prefix, []).append(float(item))
+
+    for fold in folds:
+        collect("linear", fold["metrics"])
+        if fold["challenger"] is not None:
+            collect("challenger", {
+                "profitable": fold["challenger"]["profitable"],
+                "return_mae": fold["challenger"]["return_mae"],
+                "q10_q90_coverage": fold["challenger"]["q10_q90_coverage"],
+            })
+    return {
+        metric: {"folds": len(samples), "mean": mean(samples),
+                 "std": stdev(samples) if len(samples) > 1 else 0.0}
+        for metric, samples in sorted(values.items())
+    }
 
 
 def fit_linear(train, cal, test, cost):
@@ -126,6 +153,7 @@ def main():
     parser.add_argument("--file", required=True, type=Path)
     parser.add_argument("--horizon", choices=["1D", "5D", "20D"], default="5D")
     parser.add_argument("--holdout", required=True)
+    parser.add_argument("--walk-forward-folds", default=3, type=int)
     parser.add_argument("--cost", default=.005, type=float)
     parser.add_argument("--output", default=Path("storage/models"), type=Path)
     parser.add_argument("--challenger", action="store_true")
@@ -140,6 +168,21 @@ def main():
         train, cal, test = purged_split(rows, sessions, args.holdout, horizon + 1)
         artifact, metrics = fit_linear(train, cal, test, args.cost)
         challenger = fit_challenger(train, cal, test, args.cost) if args.challenger else None
+        walk_forward = []
+        if args.walk_forward_folds:
+            for fold_train, fold_cal, fold_test in purged_walk_forward(
+                    rows, sessions, args.holdout, horizon + 1, args.walk_forward_folds):
+                _, fold_metrics = fit_linear(fold_train, fold_cal, fold_test, args.cost)
+                fold_challenger = fit_challenger(fold_train, fold_cal, fold_test, args.cost) \
+                    if args.challenger else None
+                walk_forward.append({
+                    "train_end": max(row["session"] for row in fold_train),
+                    "test_start": min(row["session"] for row in fold_test),
+                    "test_end": max(row["session"] for row in fold_test),
+                    "train_samples": len(fold_train), "calibration_samples": len(fold_cal),
+                    "test_samples": len(fold_test), "metrics": fold_metrics,
+                    "challenger": fold_challenger,
+                })
     except ValueError as error:
         print(json.dumps({"status": "BLOCKED_INSUFFICIENT_DATA", "reason": str(error), "samples": len(rows)}))
         return 2
@@ -156,7 +199,8 @@ def main():
         "dependencies": {"scikit-learn": version("scikit-learn"), "numpy": version("numpy")},
     })
     run = {"status": "SHADOW", "dataset_sha256": fingerprint, "horizon": args.horizon,
-           "cost": args.cost, "fold": fold, "metrics": metrics, "challenger": challenger}
+           "cost": args.cost, "fold": fold, "metrics": metrics, "challenger": challenger,
+           "walk_forward": walk_forward, "walk_forward_summary": summarize_walk_forward(walk_forward)}
     stem = args.horizon + "-" + hashlib.sha256(json.dumps(run, sort_keys=True).encode()).hexdigest()[:16]
     model = args.output / (stem + ".model.json")
     report = args.output / (stem + ".research.json")

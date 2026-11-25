@@ -128,6 +128,7 @@ final class Pipeline
         $db = $this->store->db;
         $date = $session['session_date'];
         $instruments = $this->store->instruments($date, $asOf);
+        $fundamentals = $this->store->fundamentalQuality($instruments, $date, $asOf);
         $models = [];
         $artifactRows = $featuresOnly ? [] : query($db, 'SELECT m.*,p.effective_at promoted_at FROM orf_model_version m
             LEFT JOIN orf_promotion p ON p.id=(SELECT n.id FROM orf_promotion n WHERE n.horizon=m.horizon
@@ -171,6 +172,12 @@ final class Pipeline
                 }
             }
             if ($feature) {
+                $cvmCode = (string) ($instrument['cvm_code'] ?? '');
+                if (isset($fundamentals[$cvmCode])) {
+                    $feature += $fundamentals[$cvmCode] + ['fundamental_status' => 'AVAILABLE'];
+                } else {
+                    $feature['fundamental_status'] = 'MISSING_OR_STALE';
+                }
                 $featureJson = json($feature);
                 $hash = hash('sha256', $featureJson);
                 if ($persist) {

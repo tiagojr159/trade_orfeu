@@ -45,16 +45,19 @@ flowchart LR
 - `app/Market.php`, `Sources.php`, `Store.php` e `Research.php` implementam calendário, contratos de dados, importadores e armazenamento point-in-time.
 - `app/Quant.php` e `Pipeline.php` implementam features, inferência, score, limite de dez, limite por setor/emissor e avaliação diária.
 - `app/Trading.php` e `Replay.php` implementam contas independentes, ordens EOD, reservas, fills, liquidação, marcação e execução em pesquisa.
+- O sinal `QUALITY_VALUE` passou a usar margem operacional e margem líquida trimestrais da CVM, disponíveis no instante da decisão. A tela o identifica como qualidade operacional; não calcula valuation nem permite promoção só com esse sinal.
+- O replay informa retorno anualizado e volatilidade por conta; anualização e Calmar ficam indisponíveis quando falta marcação válida em algum pregão da janela.
 - `public/`, `app/Http.php` e `app/Admin.php` oferecem o painel, API, exportação CSV e controles administrativos opcionais.
-- `python/orfeu_quant/` oferece montagem do painel, maturidade de labels, split purgado, baseline, challenger, métricas e inferência JSON.
+- `python/orfeu_quant/` oferece montagem do painel, maturidade de labels, holdout e folds walk-forward purgados e sem sobreposição, baseline linear, challenger LightGBM nos mesmos folds, agregação média/desvio das métricas e inferência JSON. A avaliação real depende dos dados B3 ainda não importados.
+- `python/orfeu_quant/metrics.py` também valida curvas e CDI e calcula retorno anualizado, volatilidade anualizada e Calmar, além de cobertura e Sharpe excedente.
 - `bin/orfeu.php` expõe instalação, manutenção, dados, pesquisa e jobs. `bin/tick-hostgator.sh` e `bin/tick-windows.ps1` permitem configurar o agendamento conforme o ambiente.
 
 Comandos executados incluem `doctor`, `migrate --dry-run`, `migrate`, `calendar:seed`, `universe:seed`, `season:create --name=season-001 --capital=1000`, `data:quotes --sandbox`, `data:bcb --series=12 --from=2026-11-02 --to=2026-11-24`, `data:cvm --file=storage/inbox/itr_cia_aberta_2026.zip`, `rank:refresh`, `reconcile`, `tick --dry-run`, `tick --once`, `research:export`, `research:features`, `backtest`, `tests/run.php` e `python -m unittest discover -s tests/python -v`.
 
 ## Pendências de operação e do escopo ampliado
 
-- **Histórico e ciência.** Importar COTAHIST, calendários históricos, catálogo contemporâneo com deslistadas, Ibovespa e cobertura societária. Treino com dados reais, walk-forward completo, OOS/prospectivo e promoção continuam pendentes. O conjunto disponível não sustenta métricas preditivas.
-- **Estratégias.** As 15 contas foram registradas. Seis estratégias de especialidade dependem de implementações adicionais para intraday, fundamentos setoriais, surpresa publicada, payout, fatores macro ou modelo meta. As demais compartilham a barreira de dados, edge e validação.
+- **Histórico e ciência.** Importar COTAHIST, calendários históricos, catálogo contemporâneo com deslistadas, Ibovespa e cobertura societária. O código de walk-forward já existe, mas rodadas com dados reais, OOS/prospectivo e promoção continuam pendentes. O conjunto disponível não sustenta métricas preditivas.
+- **Estratégias.** As 15 contas foram registradas. Cinco estratégias de especialidade continuam bloqueadas por falta de intraday, consenso publicado, payout histórico, modelo macro validado ou meta-modelo OOF. Qualidade operacional usa margens CVM recentes, sem ajuste setorial nem valuation. As demais compartilham a barreira de dados, edge e validação.
 - **Execução e pesquisa ampliadas.** Faltam livro intraday, ordens limite, tributação, frações societárias, séries de retorno total completas, fábrica declarativa de estratégias, rotinas completas de drift e a bateria integral de invariantes da especificação.
 - **HostGator.** Perfil cPanel, separação da área pública, Cron e PHP independente de Python foram preparados. A publicação e a validação na hospedagem dependem do ambiente do usuário. Nenhuma tarefa persistente foi instalada automaticamente.
 

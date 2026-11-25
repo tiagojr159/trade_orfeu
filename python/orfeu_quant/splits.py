@@ -21,3 +21,26 @@ def purged_split(rows, sessions, holdout, gap):
     if len(train) < 200 or len(cal) < 50 or len(test) < 50:
         raise ValueError("INSUFFICIENT_PURGED_SAMPLES")
     return train, cal, test
+
+
+def purged_walk_forward(rows, sessions, holdout, gap, folds=3):
+    """Build disjoint rolling test windows strictly before the untouched holdout."""
+    sessions = sorted(set(sessions))
+    if holdout not in sessions or gap < 0 or not isinstance(folds, int) or folds < 2 or folds > 10:
+        raise ValueError("INVALID_WALK_FORWARD")
+    holdout_index = sessions.index(holdout)
+    first_test = max(120 + 2 * gap, int(holdout_index * .60))
+    available = holdout_index - first_test
+    if available < folds * 20:
+        raise ValueError("INSUFFICIENT_WALK_FORWARD_SESSIONS")
+    width = available // folds
+    output = []
+    for index in range(folds):
+        start = first_test + index * width
+        end = holdout_index if index == folds - 1 else first_test + (index + 1) * width
+        train, calibration, future = purged_split(rows, sessions, sessions[start], gap)
+        test = [row for row in future if sessions[start] <= row["session"] < sessions[end]]
+        if len(test) < 50:
+            raise ValueError("INSUFFICIENT_WALK_FORWARD_SAMPLES")
+        output.append((train, calibration, test))
+    return output
