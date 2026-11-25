@@ -27,13 +27,18 @@ try {
     $config = new Config();
     if ($config->get('APP_ENV') === 'hostgator') {
         $setupDb = $config->connect();
+        $setupStore = new Store($setupDb);
         if (!$setupDb->query('SHOW FULL TABLES')->fetch()) {
-            $setupStore = new Store($setupDb);
             $setupStore->migrate(false);
             $setupStore->importCalendar(Calendar::official2026());
             $setupStore->catalog(ROOT . '/config/seed-catalog.csv');
             $setupStore->seedFixedWatchlist(utc(), false);
             $setupStore->season('season-001', cents($config->get('INITIAL_CAPITAL_BRL', '1000.00')), utc());
+        } else {
+            // Existing HostGator installs also need additive schema upgrades;
+            // otherwise the dashboard queries tables introduced by newer releases.
+            $setupStore->migrate(false);
+            $setupStore->seedFixedWatchlist(utc(), false);
         }
     }
     if ($config->get('ALLOW_LOCAL_ROOT') === 'true' &&
