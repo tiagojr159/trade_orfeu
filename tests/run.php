@@ -399,6 +399,50 @@ $cases['test_risk_caps_exposure_and_scales_down_in_high_volatility'] = static fu
         $signal,$next,$signal['close_at'],false)[0] === 'BUY');
     demand(reset($high->orders)['quantity'] < reset($base->orders)['quantity']);
 };
+$cases['test_sector_cap_and_aggregate_risk_gate'] = static function (): void {
+    [, $signal,$next,$row,$book] = scenario();
+    $sameSector = array_replace($row,['id'=>2,'issuer_id'=>2]);
+    demand($book->decide('ORFEU_AI',$row,$book->mark([]),$signal,$next,$signal['close_at'],false)[0] === 'BUY');
+    demand($book->decide('ORFEU_AI',$sameSector,$book->mark([]),$signal,$next,$signal['close_at'],false)[0] === 'BUY');
+    $reserved = array_values($book->state['pending']);
+    demand($reserved[0]['sector'] === $reserved[1]['sector']);
+    demand($reserved[0]['budget'] + $reserved[1]['budget'] <= 40000);
+    demand($reserved[1]['budget'] <= 10000);
+
+    $riskLimited = new PaperAccount('risk-limited',array_replace(PaperAccount::POLICY,
+        ['max_total_risk_bps'=>0]));
+    $riskLimited->deposit(100000,$signal['open_at']);
+    demand($riskLimited->decide('ORFEU_AI',$row,$riskLimited->mark([]),$signal,$next,
+        $signal['close_at'],false) === ['NO_TRADE','AGGREGATE_RISK_OR_EXPOSURE_LIMIT']);
+    demand($riskLimited->state['pending'] === [] && $riskLimited->state['reserved'] === 0);
+};
+$cases['test_ledger_reconciliation_detects_corrupted_components'] = static function (): void {
+    [, $signal,$next,$row,$book] = scenario();
+    $book->decide('ORFEU_AI',$row,$book->mark([]),$signal,$next,$signal['close_at'],false);
+    $keys = ['cash','reserved','payable','receivable','cost','realized'];
+    $totals = array_intersect_key($book->state,array_fill_keys($keys,true));
+    demand(PaperAccount::matchesLedger($totals,$book->state));
+    $totals['cash']--;
+    demand(!PaperAccount::matchesLedger($totals,$book->state));
+
+    [, , , , $filled] = buyFixture();
+    $totals = array_intersect_key($filled->state,array_fill_keys($keys,true));
+    demand(PaperAccount::matchesLedger($totals,$filled->state));
+    $filled->state['positions'][1]['cost']++;
+    demand(!PaperAccount::matchesLedger($totals,$filled->state));
+};
+$cases['test_kill_switch_thresholds_are_configurable_and_auditable'] = static function (): void {
+    $policy = array_replace(PaperAccount::POLICY,['max_portfolio_drawdown_bps'=>800,'max_daily_loss_bps'=>250]);
+    $events = RiskControls::events(['status'=>'AVAILABLE','drawdown'=>-.081,'daily_return'=>-.026],false,$policy);
+    demand(count($events) === 2 && $events[0]['type'] === 'MAX_PORTFOLIO_DRAWDOWN' &&
+        $events[0]['severity'] === 'KILL_SWITCH' && $events[1]['type'] === 'MAX_DAILY_LOSS');
+    demand(RiskControls::events(['status'=>'MISSING','drawdown'=>-.50],false,$policy) === []);
+    demand(RiskControls::events(['status'=>'AVAILABLE'],true,$policy)[0]['type'] === 'SEASON_PAUSED');
+    demand(RiskControls::events(['status'=>'AVAILABLE','drawdown'=>-.50],false,
+        array_replace($policy,['kill_switch_enabled'=>false])) === []);
+    demand(RiskControls::events(['status'=>'AVAILABLE','drawdown'=>-.11],false,
+        ['max_exposure_bps'=>9000])[0]['type'] === 'MAX_PORTFOLIO_DRAWDOWN');
+};
 
 $errors = 0;
 foreach ($cases as $name=>$test) {

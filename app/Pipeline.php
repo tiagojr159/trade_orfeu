@@ -519,7 +519,16 @@ final class Pipeline
                     }
                     $book->execute($session, $openEvidence, $instruments, $settlement, (bool) $season['paused'], $buyIds,$at,$missed);
                     $mark = $book->close($prices, $session['session_date'],$at);
-                    $paused = $season['paused'] || $mark['drawdown'] <= -.10 || $mark['daily_return'] <= -.03;
+                    $riskEvents = RiskControls::events($mark,(bool) $season['paused'],$policy);
+                    $paused = (bool) $riskEvents;
+                    foreach ($riskEvents as $event) {
+                        query($db, 'INSERT IGNORE INTO orf_risk_event
+                            (account_id,session_date,as_of,event_type,severity,payload) VALUES(?,?,?,?,?,?)',
+                            [$id,$session['session_date'],$at,$event['type'],$event['severity'],json([
+                                'equity_cents'=>$mark['equity_cents'] ?? null,
+                                'drawdown'=>$mark['drawdown'] ?? null,
+                                'daily_return'=>$mark['daily_return'] ?? null] + $event)]);
+                    }
                     $candidates = $ranked;
                     foreach ($book->state['positions'] as $instrument => $position) {
                         if (isset($instruments[$instrument]) && !isset($candidates[$instrument])) {

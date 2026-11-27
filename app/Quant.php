@@ -189,3 +189,88 @@ final class Ranking
         return $out;
     }
 }
+
+/** Research catalogue and data readiness for the quant-intelligence dashboard. */
+final class QuantIntelligence
+{
+    public static function dashboard(Store $store, string $at, int $barCount): array
+    {
+        $db = $store->db;
+        $definitions = [
+            ['key'=>'DYNAMIC_PAIRS_LONG_ONLY','name'=>'Dynamic Pairs Long-Only','mode'=>'ANALYTICAL_AND_LONG_ONLY_RESEARCH',
+                'requirements'=>['252 sessões sincronizadas','statsmodels','histórico point-in-time e FDR'],
+                'restriction'=>'Compra apenas a perna subavaliada dentro do universo fixo; exposição direcional.'],
+            ['key'=>'ML_STATISTICAL_ARBITRAGE','name'=>'ML Statistical Arbitrage','mode'=>'ANALYTICAL_ONLY',
+                'requirements'=>['labels maduros','validação temporal purgada','amostra OOS'],
+                'restriction'=>'Sem novas ordens; classificadores precisam superar o baseline fora da amostra.'],
+            ['key'=>'MULTIFACTOR_LONG_ONLY','name'=>'Multifactor Long-Only','mode'=>'LONG_ONLY_RESEARCH',
+                'requirements'=>['fundamentos CVM com data de publicação','cobertura setorial','histórico de mercado'],
+                'restriction'=>'Compra somente; sinal Short apenas informativo.'],
+            ['key'=>'ADAPTIVE_MOMENTUM','name'=>'Adaptive Momentum','mode'=>'LONG_ONLY_RESEARCH',
+                'requirements'=>['253 sessões por ativo','benchmark histórico','custos'],
+                'restriction'=>'Rotação dinâmica permanece desabilitada.'],
+            ['key'=>'MEAN_REVERSION','name'=>'Mean Reversion','mode'=>'LONG_ONLY_RESEARCH',
+                'requirements'=>['61 sessões','liquidez','eventos corporativos','filtro de tendência'],
+                'restriction'=>'Queda isolada não cria entrada.'],
+            ['key'=>'QUANTITATIVE_SWING','name'=>'Quantitative Swing Trading','mode'=>'LONG_ONLY_RESEARCH',
+                'requirements'=>['histórico EOD ou intraday','custos','walk-forward'],
+                'restriction'=>'Stops e dimensionamento existentes não substituem validação OOS.'],
+            ['key'=>'CASH_CARRY','name'=>'Cash and Carry','mode'=>'OBSERVATION_ONLY',
+                'requirements'=>['contrato futuro','curva CDI/Selic','proventos e custos'],
+                'restriction'=>'Derivativos não entram nas carteiras virtuais.'],
+            ['key'=>'OPTIONS_ANALYSIS','name'=>'Options Arbitrage Analysis','mode'=>'ANALYTICAL_ONLY',
+                'requirements'=>['cadeia histórica de opções','volatilidade implícita','proventos'],
+                'restriction'=>'Sem operações simuladas com opções.'],
+            ['key'=>'MARKET_MAKING_ANALYSIS','name'=>'Market Making Analysis','mode'=>'ANALYTICAL_ONLY',
+                'requirements'=>['livro de ofertas histórico','eventos de ordens e fills'],
+                'restriction'=>'Candles diários não validam market making; sem venda descoberta.'],
+        ];
+        $symbolHistory = (int) query($db, 'SELECT COUNT(DISTINCT instrument_id) FROM orf_bar WHERE market=? AND available_at<=?',
+            ['010',$at])->fetchColumn();
+        $historyStatus = $barCount > 0 ? 'DATA_PRESENT_REQUIRES_COVERAGE_REVIEW' : 'BLOCKED_NO_EOD_DATA';
+        foreach ($definitions as &$item) {
+            $item['status'] = $barCount > 0 ? 'RESEARCH_DATA_REVIEW_REQUIRED' : $historyStatus;
+            if ($item['key'] === 'CASH_CARRY') {
+                $item['status'] = 'OBSERVATION_ONLY_MISSING_FUTURES_DATA';
+            } elseif ($item['key'] === 'OPTIONS_ANALYSIS') {
+                $item['status'] = 'ANALYTICAL_ONLY_MISSING_OPTIONS_DATA';
+            } elseif ($item['key'] === 'MARKET_MAKING_ANALYSIS') {
+                $item['status'] = 'ANALYTICAL_ONLY_MISSING_ORDERBOOK_DATA';
+            }
+        }
+        unset($item);
+        $latest = query($db, 'SELECT id,created_at,payload FROM orf_research_run WHERE kind=?
+            ORDER BY created_at DESC,id DESC LIMIT 1', ['RESEARCH'])->fetch();
+        $report = $latest ? json_decode($latest['payload'],true,64,JSON_THROW_ON_ERROR) : null;
+        $isQuantReport = ($report['schema'] ?? '') === 'ORFEU_QUANT_RESEARCH_V1';
+        $date = Calendar::brazilDate($at);
+        $instruments = $store->instruments($date,$at);
+        $fundamentals = $store->fundamentalQuality($instruments,$date,$at);
+        $quality = [];
+        foreach ($instruments as $instrument) {
+            $code = (string) ($instrument['cvm_code'] ?? '');
+            if ($code !== '' && isset($fundamentals[$code])) {
+                $quality[] = ['symbol'=>$instrument['symbol'],'sector'=>$instrument['sector'],
+                    'net_margin'=>$fundamentals[$code]['net_margin'],'operating_margin'=>$fundamentals[$code]['ebit_margin'],
+                    'period_end'=>$fundamentals[$code]['financial_period_end'],
+                    'available_at'=>$fundamentals[$code]['financial_available_at'],'source'=>'CVM_ITR'];
+            }
+        }
+        return ['as_of'=>$at, 'paper_trading_only'=>true, 'live_trading_enabled'=>false,
+            'short_selling_enabled'=>false, 'leverage_enabled'=>false, 'derivatives_trading_enabled'=>false,
+            'dynamic_rotation'=>false, 'eod_bar_count'=>$barCount, 'symbols_with_eod_history'=>$symbolHistory,
+            'market_results_status'=>$isQuantReport ? ($report['status'] ?? 'NOT_CALCULATED') : 'NOT_CALCULATED',
+            'latest_report'=>$isQuantReport ? ['id'=>$latest['id'],'created_at'=>$latest['created_at'],
+                'source_sha256'=>$report['source_sha256'] ?? null,'bars_available'=>$report['bars_available'] ?? 0,
+                'raw_bars_available_before_identity_gate'=>$report['raw_bars_available_before_identity_gate'] ?? 0,
+                'identity_evidence_count'=>$report['identity_evidence_count'] ?? 0,
+                'as_of'=>$report['as_of'] ?? null,
+                'pair_candidates'=>$report['pair_candidates_after_fdr'] ?? 0,
+                'pair_tests'=>$report['pair_tests'] ?? [],
+                  'correlation_heatmap'=>$report['correlation_heatmap'] ?? ['status'=>'BLOCKED_NOT_CALCULATED'],
+                'operational_history'=>$report['operational_history'] ?? []] : null,
+            'quality_snapshot'=>['status'=>$quality ? 'PARTIAL_ANALYTICAL_ONLY' : 'BLOCKED_NO_POINT_IN_TIME_FUNDAMENTALS',
+                'scope'=>'AVAILABLE_CVM_CATALOG_NOT_FIXED_PORTFOLIO_RANKING','items'=>$quality],
+            'items'=>$definitions];
+    }
+}

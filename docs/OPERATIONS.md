@@ -41,6 +41,14 @@ O calendário incluído cobre 2026. Importe anos adicionais antes de voltar no h
 
 `universe:import` usa o cabeçalho de `config/seed-catalog.csv`. Valide fonte oficial, espécie ON/PN, emissor, lote, fracionário e vigência antes de marcar `ACTIVE`. Para replay inclua históricos de símbolos e de elegibilidade, IPOs e deslistadas. Um ZIP COTAHIST deve conter um arquivo `COTAHIST*.TXT` com preços brutos e fator unitário. A importação preserva o ISIN, resolve símbolo pelo catálogo e mantém os mercados 010 e 020 separados.
 
+Para liberar pesquisa de um ticker, registre a fonte oficial que associa ticker, ISIN e instrumento. `identity:verify` calcula o SHA-256 do arquivo de evidência local, confere símbolo e ISIN contra o cadastro ORFEU e registra a vigência temporal. Para os dez ativos fixos, o mesmo comando também atualiza o vínculo da cesta. Use apenas arquivos obtidos com autorização; pesquisa de pares permanece bloqueada enquanto faltar essa evidência.
+
+```powershell
+& $php bin/orfeu.php identity:verify --dry-run --instrument=123 --symbol=PETR4 `
+  --isin=BRPETRACNPR6 --valid-from=2020-01-01 --source=B3_ASSET_CATALOG `
+  --evidence-file=storage/inbox/catalogo-b3.csv --evidence-ref="registro da fonte oficial"
+```
+
 Por padrão, a disponibilidade da barra é a data de ingestão. Para pesquisa histórica forneça `--availability-file=...` com colunas `session_date,published_at,archive_sha256,source_reference`. Cada linha precisa descrever a mesma versão do arquivo efetivamente publicada naquele horário. Preserve o documento de origem e a primeira publicação. Um arquivo anual obtido hoje pode conter correções e não comprova publicação histórica. Evidência de publicação deve acompanhar a primeira importação.
 
 O importador CVM recebe ZIP ITR/DFP oficial e seleciona demonstrações consolidadas e contas fixas dos emissores com `cvm_code`. O importador SGS suporta 11, 12 e 433. A brapi usa v1 com Bearer opcional e guarda cotações com timestamp do fornecedor. O sandbox permite uma parte das ações. O usuário do token deve verificar plano e direitos de armazenamento e uso. [ITR CVM](https://dados.cvm.gov.br/dataset/cia_aberta-doc-itr) · [DFP CVM](https://dados.cvm.gov.br/dataset/cia_aberta-doc-dfp) · [Cotações históricas B3](https://www.b3.com.br/pt_br/market-data-e-indices/servicos-de-dados/market-data/historico/mercado-a-vista/cotacoes-historicas/) · [Autenticação e limites da brapi](https://brapi.dev/docs/authentication).

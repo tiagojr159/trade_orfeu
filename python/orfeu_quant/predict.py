@@ -2,8 +2,8 @@ import argparse
 import hashlib
 import json
 import math
-from pathlib import Path
 from importlib.metadata import version
+from pathlib import Path
 
 from .data import COLUMNS, SCHEMA, utc
 
@@ -47,8 +47,8 @@ def predict(model, feature, as_of):
 
 
 def load_challenger(model):
-    from lightgbm import Booster
     import numpy as np
+    from lightgbm import Booster
 
     if model["schema"] != SCHEMA or model["columns"] != COLUMNS or model["runtime"] != version("lightgbm"):
         raise ValueError("INVALID_CHALLENGER_RUNTIME_OR_SCHEMA")

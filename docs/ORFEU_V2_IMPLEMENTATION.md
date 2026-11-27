@@ -39,7 +39,7 @@ php bin/orfeu.php universe:seed-fixed
 php bin/orfeu.php reconcile
 ```
 
-Após conferir a identidade nas fontes oficiais, importe o catálogo validado com `universe:import --file=...` e registre o vínculo com `universe:verify-fixed --symbol=... --instrument=... --evidence=...`. O vínculo não promove o catálogo a ACTIVE. Importe calendário, cobertura de eventos e COTAHIST pelos comandos do [guia de operação](OPERATIONS.md). Os baselines exigem identidade verificada, situação ACTIVE, barras contíguas, liquidez, preço mínimo, cobertura de eventos e amplitude maior que o custo estimado. As regras de força relativa e regime dependem também de benchmark. O PHP processa as execuções EOD com o preço de abertura da sessão elegível quando os dados oficiais são importados.
+Após conferir a identidade em fonte oficial, importe o catálogo e registre ticker, ISIN, vigência, referência e hash do arquivo autorizado com `identity:verify`; o comando também registra o vínculo da cesta fixa quando aplicável. O cadastro não promove o ativo a ACTIVE. Importe calendário, cobertura de eventos e COTAHIST pelos comandos do [guia de operação](OPERATIONS.md). Os baselines exigem identidade verificada, situação ACTIVE, barras contíguas, liquidez, preço mínimo, cobertura de eventos e amplitude maior que o custo estimado. As regras de força relativa e regime dependem também de benchmark. O PHP processa as execuções EOD com o preço de abertura da sessão elegível quando os dados oficiais são importados.
 
 Para desfazer a atualização, pause a Cron, restaure a versão anterior do PHP e confira `doctor` e `reconcile`. A migration é aditiva, portanto o rollback do código pode preservar a tabela nova. Preserve as operações já contabilizadas.
 

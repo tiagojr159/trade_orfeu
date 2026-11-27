@@ -133,7 +133,7 @@ final class Replay
                 }
                 $book->execute($session,$data,$instruments,$due);
                 $mark = $book->close($prices,$date,$decisionAt);
-                $paused = $mark['drawdown'] <= -.10 || $mark['daily_return'] <= -.03;
+                $paused = (bool) RiskControls::events($mark,false,$policy);
                 foreach ($rank as $id => $candidate) {
                     if (!isset($prices[$id]) || !eligible($instruments[$id] ?? [])) {
                         continue;

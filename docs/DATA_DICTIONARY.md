@@ -25,3 +25,5 @@ Formato para importar observações manualmente em CSV UTF-8 com cabeçalho `kin
 - `ACTION_COVERAGE`, sujeito igual ao ID numérico do instrumento, `{"start":"2026-01-02","verified":true}`. A data de referência define a última sessão coberta. A instituição que fornece o arquivo deve conferir todos os eventos no intervalo.
 
 Nas demonstrações CVM, `subject` identifica CVM, formulário, demonstrativo e conta contábil. O payload retém versão, escala original, período e ID do documento. A disponibilidade conservadora é a meia-noite local seguinte à data de protocolo. No SGS sem vintage, a disponibilidade é o recebimento da consulta.
+
+`orf_identity_evidence` stores auditable research mappings from ticker and ISIN to an internal instrument with effective dates, verification availability, source reference, and SHA-256 of the authorized evidence file. For fixed-basket symbols, `orf_fixed_watchlist` keeps the operational identity link; the verification command updates both stores in one transaction. Exports omit evidence unavailable at their as-of cutoff.

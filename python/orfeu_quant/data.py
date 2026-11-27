@@ -2,8 +2,7 @@ import hashlib
 import json
 from bisect import bisect_left
 from collections import defaultdict
-from datetime import datetime, timezone
-
+from datetime import UTC, datetime
 
 SCHEMA = "eod-raw-v1"
 COLUMNS = ["mom5", "mom20", "mom60", "vol20", "trend", "rsi", "z20", "relative", "atr"]
@@ -11,7 +10,7 @@ COLUMNS = ["mom5", "mom20", "mom60", "vol20", "trend", "rsi", "z20", "relative",
 
 def utc(value):
     result = datetime.fromisoformat(value)
-    return result.astimezone(timezone.utc) if result.tzinfo else result.replace(tzinfo=timezone.utc)
+    return result.astimezone(UTC) if result.tzinfo else result.replace(tzinfo=UTC)
 
 
 def read_export(path):

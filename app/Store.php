@@ -177,20 +177,72 @@ final class Store
             'watchlist_schema_ready'=>$watchlistExists,'items'=>$items];
     }
 
-    public function verifyFixedIdentity(string $symbol, int $id, string $evidence, string $at): void
+    public function verifyIdentityEvidence(int $id, string $symbol, string $isin, string $validFrom,
+        ?string $validTo, string $source, string $evidenceRef, string $rawHash, string $at,
+        bool $dryRun = false): void
     {
-        $fixed = require ROOT . '/config/fixed-universe.php';
-        $instrument = $this->instruments(Calendar::brazilDate($at),$at)[$id] ?? null;
-        if (!isset($fixed['members'][$symbol]) || ($instrument['symbol'] ?? null) !== $symbol ||
-            trim($evidence) === '' || strlen($evidence) > 255) {
-            throw new RuntimeException('INVALID_WATCHLIST_IDENTITY');
+        $symbol = strtoupper(trim($symbol));
+        $isin = strtoupper(trim($isin));
+        $validFrom = day($validFrom);
+        $validTo = $validTo === null || trim($validTo) === '' ? null : day($validTo);
+        $source = strtoupper(trim($source));
+        $evidenceRef = trim($evidenceRef);
+        $rawHash = strtolower(trim($rawHash));
+        if ($id < 1 || !preg_match('/^[A-Z0-9]{4,8}$/D',$symbol) ||
+            !preg_match('/^BR[A-Z0-9]{10}$/D',$isin) || $validTo !== null && $validTo < $validFrom ||
+            !in_array($source,['B3_ASSET_CATALOG','B3_INSTRUMENT_CATALOG'],true) ||
+            $evidenceRef === '' || strlen($evidenceRef) > 255 || !preg_match('/^[a-f0-9]{64}$/D',$rawHash)) {
+            throw new RuntimeException('INVALID_IDENTITY_EVIDENCE');
         }
-        $updated = query($this->db, 'UPDATE orf_fixed_watchlist SET instrument_id=?,identity_verified_at=?,evidence_ref=?
-            WHERE version=? AND symbol=? AND instrument_id IS NULL',
-            [$id,$at,$evidence,$fixed['version'],$symbol])->rowCount();
-        if (!$updated) {
-            throw new RuntimeException('WATCHLIST_UNSEEDED_OR_IDENTITY_ALREADY_VERIFIED');
-        }
+        transaction($this->db,function () use ($id,$symbol,$isin,$validFrom,$validTo,$source,$evidenceRef,$rawHash,$at,$dryRun): void {
+            $instrument = $this->instruments($validFrom,$at)[$id] ?? null;
+            if (!$instrument || $instrument['symbol'] !== $symbol || strtoupper($instrument['isin']) !== $isin ||
+                !in_array($instrument['asset_type'],['ON','PN'],true)) {
+                throw new RuntimeException('IDENTITY_EVIDENCE_CATALOG_MISMATCH');
+            }
+            $symbolChanges = query($this->db, 'SELECT DISTINCT valid_from FROM orf_symbol_history
+                WHERE instrument_id=? AND valid_from>? AND valid_from<=COALESCE(?,"9999-12-31") AND available_at<=?
+                ORDER BY valid_from', [$id,$validFrom,$validTo,$at])->fetchAll(PDO::FETCH_COLUMN);
+            foreach ($symbolChanges as $changeDate) {
+                $changed = $this->instruments((string) $changeDate,$at)[$id] ?? null;
+                if (($changed['symbol'] ?? null) !== $symbol) {
+                    throw new RuntimeException('IDENTITY_EVIDENCE_CROSSES_SYMBOL_CHANGE');
+                }
+            }
+            $conflict = query($this->db, 'SELECT id FROM orf_identity_evidence WHERE available_at<=?
+                AND valid_from<=COALESCE(?,"9999-12-31") AND COALESCE(valid_to,"9999-12-31")>=?
+                AND ((symbol=? AND instrument_id<>?) OR
+                     (instrument_id=? AND (symbol<>? OR isin<>?)) OR
+                     (isin=? AND instrument_id<>?)) LIMIT 1 FOR UPDATE',
+                [$at,$validTo,$validFrom,$symbol,$id,$id,$symbol,$isin,$isin,$id])->fetchColumn();
+            if ($conflict) {
+                throw new RuntimeException('IDENTITY_EVIDENCE_OVERLAP_CONFLICT');
+            }
+            if (!$dryRun) {
+                query($this->db, 'INSERT INTO orf_identity_evidence
+                    (instrument_id,symbol,isin,valid_from,valid_to,available_at,source,evidence_ref,raw_hash)
+                    VALUES(?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE id=id',
+                    [$id,$symbol,$isin,$validFrom,$validTo,$at,$source,$evidenceRef,$rawHash]);
+            }
+
+            $fixed = require ROOT . '/config/fixed-universe.php';
+            if (isset($fixed['members'][$symbol])) {
+                $member = query($this->db, 'SELECT instrument_id FROM orf_fixed_watchlist WHERE version=? AND symbol=? FOR UPDATE',
+                    [$fixed['version'],$symbol])->fetchColumn();
+                if ($member === false) {
+                    throw new RuntimeException('FIXED_WATCHLIST_NOT_SEEDED');
+                }
+                if ($member !== null && (int) $member !== $id) {
+                    throw new RuntimeException('WATCHLIST_IDENTITY_CONFLICT');
+                }
+                if (!$dryRun) {
+                    query($this->db, 'UPDATE orf_fixed_watchlist SET instrument_id=?,identity_verified_at=?,evidence_ref=?
+                        WHERE version=? AND symbol=? AND identity_verified_at IS NULL
+                        AND (instrument_id IS NULL OR instrument_id=?)',
+                        [$id,$at,$evidenceRef,$fixed['version'],$symbol,$id]);
+                }
+            }
+        });
     }
 
     public function importCalendar(array $rows, bool $dry = false): int

@@ -27,6 +27,7 @@ if (!defined('Orfeu\\ROOT')) {
       <a href="#laboratorio">Laboratório</a>
       <a href="#fontes">Monitoramento</a>
       <a href="#logs">Logs</a>
+      <a href="#quant">ORFEU Quant Intelligence</a>
     </nav>
     <div class="sidebar-foot"><span class="dot"></span> Negociação virtual</div>
   </aside>
@@ -52,6 +53,19 @@ if (!defined('Orfeu\\ROOT')) {
       <p class="details">A probabilidade de queda é o complemento da probabilidade de alta. O resultado depende de histórico EOD e modelo disponível; não é garantia de retorno.</p>
       <div class="table-wrap"><table><thead><tr><th>Ação</th><th>Horizonte</th><th>Prob. de alta</th><th>Prob. de queda</th><th>Retorno bruto estimado</th><th>Modelo</th><th>Gerada em</th></tr></thead><tbody id="prediction-rows"></tbody></table></div>
       <p id="predictions-empty" class="details muted">Sem previsões registradas. São necessários histórico diário importado e modelo compatível.</p>
+    </section>
+    <section id="quant" class="panel"><div class="panel-title"><h2>ORFEU Quant Intelligence</h2><span id="quant-status" class="tag">Aguardando dados</span></div>
+      <p id="quant-summary" class="details muted">O estado das estrat&#233;gias ser&#225; calculado pelo backend a partir dos dados dispon&#237;veis.</p>
+      <div class="table-wrap"><table><thead><tr><th>Estrat&#233;gia</th><th>Estado dos dados</th><th>Modo</th><th>Requisito e restri&#231;&#227;o</th></tr></thead><tbody id="quant-rows"></tbody></table></div>
+      <div class="panel-title"><h2>Cointegra&#231;&#227;o de pares</h2><span id="pair-status" class="muted">Sem relat&#243;rio</span></div>
+      <p id="pairs-empty" class="details muted">Os testes aparecem ap&#243;s an&#225;lise de barras point-in-time e identidades verificadas. A lista &#233; anal&#237;tica; n&#227;o abre posi&#231;&#245;es vendidas.</p>
+      <div class="table-wrap"><table><thead><tr><th>Par</th><th>Estado</th><th>Sess&#245;es</th><th>p-valor</th><th>q-valor FDR</th><th>Z-score din&#226;mico</th><th>Half-life</th></tr></thead><tbody id="pair-rows"></tbody></table></div>
+      <div class="panel-title"><h2>Correlação dos retornos</h2><span id="correlation-status" class="muted">Aguardando dados</span></div>
+      <p id="correlation-empty" class="details muted">A matriz exige histórico sincronizado e identidade verificada para os dez ativos. Usa retornos de fechamento bruto, sem ajuste por eventos societários; não habilita operações.</p>
+      <div class="table-wrap"><table><thead id="correlation-head"></thead><tbody id="correlation-rows"></tbody></table></div>
+      <div class="panel-title"><h2>Qualidade operacional parcial (CVM ITR)</h2><span id="quality-status" class="muted">Aguardando dados</span></div>
+      <p class="details muted">Somente margens divulgadas e dispon&#237;veis no corte; n&#227;o representa ranking multifatorial nem altera a carteira fixa.</p>
+      <div class="table-wrap"><table><thead><tr><th>A&#231;&#227;o do cat&#225;logo</th><th>Margem operacional</th><th>Margem l&#237;quida</th><th>Per&#237;odo</th><th>Dispon&#237;vel em</th></tr></thead><tbody id="quality-rows"></tbody></table></div>
     </section>
     <section id="noticias" class="panel"><div class="panel-title"><h2>Notícias da B3</h2><span id="news-status" class="muted">Carregando</span></div>
       <div id="news-data" class="news-list details"></div>

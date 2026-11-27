@@ -143,6 +143,7 @@ final class PaperAccount
         'version' => 'EOD_NEXT_OPEN_V1', 'max_positions' => 4, 'weight_bps' => 3000,
         'sector_bps' => 4000, 'risk_bps' => 100, 'cash_buffer_bps' => 500,
         'max_exposure_bps'=>9000,'max_total_risk_bps'=>300,'vol_target_bps'=>3500,
+        'max_portfolio_drawdown_bps'=>1000,'max_daily_loss_bps'=>300,'kill_switch_enabled'=>true,
         'regular_penalty_bps' => 8, 'odd_penalty_bps' => 18, 'fee_bps' => 4,
     ];
 
@@ -543,5 +544,35 @@ final class PaperAccount
         unset($pos);
         unset($pos);
         return $marked;
+    }
+}
+
+final class RiskControls
+{
+    public static function events(array $mark, bool $seasonPaused, array $policy): array
+    {
+        if (($mark['status'] ?? '') !== 'AVAILABLE') {
+            return $seasonPaused ? [['type'=>'SEASON_PAUSED','severity'=>'BLOCK_ENTRIES']] : [];
+        }
+        $events = [];
+        if ($seasonPaused) {
+            $events[] = ['type'=>'SEASON_PAUSED','severity'=>'BLOCK_ENTRIES'];
+        }
+        if (array_key_exists('kill_switch_enabled',$policy) && !$policy['kill_switch_enabled']) {
+            return $events;
+        }
+        $drawdownLimit = max(1, (int) ($policy['max_portfolio_drawdown_bps'] ?? 1000));
+        $dailyLimit = max(1, (int) ($policy['max_daily_loss_bps'] ?? 300));
+        if (isset($mark['drawdown']) && is_numeric($mark['drawdown']) &&
+            $mark['drawdown'] <= -$drawdownLimit / 10000) {
+            $events[] = ['type'=>'MAX_PORTFOLIO_DRAWDOWN','severity'=>'KILL_SWITCH',
+                'observed_bps'=>(int) round($mark['drawdown'] * 10000),'limit_bps'=>$drawdownLimit];
+        }
+        if (isset($mark['daily_return']) && is_numeric($mark['daily_return']) &&
+            $mark['daily_return'] <= -$dailyLimit / 10000) {
+            $events[] = ['type'=>'MAX_DAILY_LOSS','severity'=>'BLOCK_ENTRIES',
+                'observed_bps'=>(int) round($mark['daily_return'] * 10000),'limit_bps'=>$dailyLimit];
+        }
+        return $events;
     }
 }

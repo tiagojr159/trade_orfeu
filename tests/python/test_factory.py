@@ -24,6 +24,31 @@ class FactoryTests(unittest.TestCase):
         self.assertEqual(candidates, list(factory.candidates(11, 4)))
         self.assertEqual(len({json.dumps(item, sort_keys=True) for item in candidates}), 8)
 
+    def test_declarative_spec_is_bounded_and_reproducible(self):
+        spec = {"schema": factory.SPEC_SCHEMA, "strategy": "MOMENTUM",
+                "parameters": {"threshold": [1.0, 1.5], "atr_stop": [2.0], "holding": [5, 10]},
+                "folds": [["2025-01-01", "2025-03-31"], ["2025-04-01", "2025-06-30"]],
+                "holdout": ["2025-07-01", "2025-09-30"], "seed": 9, "budget": 3}
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "strategy.json"
+            path.write_text(json.dumps(spec), encoding="utf-8")
+            loaded = factory.load_spec(path)
+        selected = list(factory.candidates(loaded["seed"], loaded["budget"], loaded))
+        self.assertEqual(len(selected), 3)
+        self.assertTrue(all(item["strategy"] == "MOMENTUM" for item in selected))
+        self.assertEqual(selected, list(factory.candidates(loaded["seed"], loaded["budget"], loaded)))
+
+    def test_declarative_spec_rejects_unsafe_or_unbounded_values(self):
+        spec = {"schema": factory.SPEC_SCHEMA, "strategy": "MEAN_REVERSION",
+                "parameters": {"threshold": ["__import__('os')"], "atr_stop": [2.0], "holding": [5]},
+                "folds": [["2025-01-01", "2025-03-31"], ["2025-04-01", "2025-06-30"]],
+                "holdout": ["2025-07-01", "2025-09-30"], "seed": 9, "budget": 3}
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "unsafe.json"
+            path.write_text(json.dumps(spec), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "PARAMETERS"):
+                factory.load_spec(path)
+
     def test_objective_rejects_insufficient_trades_and_data(self):
         self.assertEqual(factory.objective([replay_result(19), replay_result(20)])[1], "INSUFFICIENT_CLOSED_TRADES")
         self.assertEqual(factory.objective([{"status": "ERROR"}])[1], "INSUFFICIENT_COMPARABLE_DATA")

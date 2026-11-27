@@ -38,7 +38,7 @@ try {
     $commands = ['doctor','migrate','calendar:seed','calendar:import','universe:seed','universe:import',
         'data:backfill','data:quotes','data:bcb','data:cvm','data:observations','data:news','season:create',
         'rank:refresh','tick','reconcile','research:features','research:export','research:import','model:import','model:promote',
-        'backtest','report:daily','universe:seed-fixed','universe:verify-fixed','data:coverage','calendar:sync','predictions:evaluate',
+        'backtest','report:daily','universe:seed-fixed','universe:verify-fixed','identity:verify','data:coverage','calendar:sync','predictions:evaluate',
         'research:trial','research:intraday','jobs:retry-eod'];
     if ($cmd === 'help') {
         echo implode(PHP_EOL, $commands) . PHP_EOL;
@@ -59,7 +59,8 @@ try {
             $tables = $db->query('SHOW FULL TABLES')->fetchAll(\PDO::FETCH_COLUMN);
             $counts = [];
             foreach (['orf_session','orf_bar','orf_quote','orf_prediction','orf_prediction_evaluation',
-                'orf_order','orf_fill','orf_account','orf_fixed_watchlist','orf_job_checkpoint'] as $table) {
+                'orf_order','orf_fill','orf_account','orf_fixed_watchlist','orf_identity_evidence',
+                'orf_job_checkpoint'] as $table) {
                 $counts[$table] = in_array($table,$tables,true) ? (int) $db->query("SELECT COUNT(*) FROM $table")->fetchColumn() : null;
             }
             $info['db'] = ['schema' => $db->query('SELECT DATABASE()')->fetchColumn(), 'version' => $db->query('SELECT VERSION()')->fetchColumn(),
@@ -99,12 +100,25 @@ try {
             $result = $store->seedFixedWatchlist($at, isset($options['dry-run']));
             break;
         case 'universe:verify-fixed':
+        case 'identity:verify':
             $id = filter_var($options['instrument'] ?? '', FILTER_VALIDATE_INT, ['options'=>['min_range'=>1]]);
-            if (!$id || !is_string($options['symbol'] ?? null) || !is_string($options['evidence'] ?? null)) {
-                throw new RuntimeException('INVALID_WATCHLIST_IDENTITY');
+            foreach (['symbol','isin','valid-from','source','evidence-ref'] as $required) {
+                if (!is_string($options[$required] ?? null)) {
+                    throw new RuntimeException('INVALID_IDENTITY_EVIDENCE');
+                }
             }
-            $store->verifyFixedIdentity($options['symbol'], $id, $options['evidence'], $at);
-            $result = ['status'=>'VERIFIED','symbol'=>$options['symbol'],'instrument_id'=>$id];
+            if (!isset($options['evidence-file'])) {
+                throw new RuntimeException('IDENTITY_EVIDENCE_FILE_REQUIRED');
+            }
+            $evidenceFile = inputFile(['file'=>$options['evidence-file']]);
+            $validTo = isset($options['valid-to']) && is_string($options['valid-to']) ? $options['valid-to'] : null;
+            $rawHash = hash_file('sha256',$evidenceFile);
+            $store->verifyIdentityEvidence((int) $id,$options['symbol'],$options['isin'],$options['valid-from'],
+                $validTo,$options['source'],$options['evidence-ref'],$rawHash,$at,isset($options['dry-run']));
+            $result = ['status'=>isset($options['dry-run']) ? 'VALIDATED_NOT_SAVED' : 'VERIFIED',
+                'symbol'=>strtoupper($options['symbol']),'instrument_id'=>(int) $id,
+                'valid_from'=>$options['valid-from'],'valid_to'=>$validTo,'source'=>$options['source'],
+                'evidence_sha256'=>$rawHash,'dry_run'=>isset($options['dry-run'])];
             break;
         case 'migrate':
             $result = $store->migrate(isset($options['dry-run']));

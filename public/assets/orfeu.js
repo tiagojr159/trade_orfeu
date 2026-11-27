@@ -3,9 +3,11 @@
 const byId = (id) => document.getElementById(id);
 const currency = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
 const percent = new Intl.NumberFormat('pt-BR', { style: 'percent', maximumFractionDigits: 2 });
+const decimal = new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 3 });
 const time = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short', timeZone: 'America/Sao_Paulo' });
 const amount = (cents) => cents == null ? '—' : currency.format(Number(cents) / 100);
 const pct = (fraction) => fraction == null ? '—' : percent.format(fraction);
+const metric = (value) => value == null || !Number.isFinite(Number(value)) ? '—' : decimal.format(Number(value));
 const dateTime = (value) => value ? time.format(new Date(value.replace(' ', 'T') + 'Z')) : '—';
 const set = (id, value) => { byId(id).textContent = value; };
 let tradeRows = [];
@@ -170,6 +172,82 @@ function render(data) {
   set('ibov', 'Ibovespa · ' + (ibov ? Number(ibov.value).toLocaleString('pt-BR') : '—'));
   set('season', data.season?.name ?? 'Aguardando temporada');
   set('universe-status', 'Lista fixa · ' + data.items.length + ' ações');
+  const quant = data.quant_intelligence || {};
+  const quantStatus = {BLOCKED_NO_EOD_DATA: 'Pesquisa bloqueada · sem histórico EOD',
+    BLOCKED_IDENTITY_EVIDENCE: 'Pesquisa bloqueada · identidade sem evidência',
+    RESEARCH_ONLY: 'Pesquisa executada · somente analítica', NOT_CALCULATED: 'Pesquisa ainda não executada'};
+  set('quant-status', quantStatus[quant.market_results_status] || quant.market_results_status || 'Estado indisponível');
+  set('quant-summary', 'Dados EOD registrados: ' + (quant.eod_bar_count ?? 0) +
+    ' · Barras oficiais antes do gate de identidade: ' + (quant.latest_report?.raw_bars_available_before_identity_gate ?? 0) +
+    ' · Ativos com histórico: ' + (quant.symbols_with_eod_history ?? 0) +
+    ' · Identidades com evidência: ' + (quant.latest_report?.identity_evidence_count ?? 0) +
+    ' · Candidatos de pares após FDR: ' + (quant.latest_report?.pair_candidates ?? 'não calculados') +
+    ' · PAPER_TRADING_ONLY ativo · operações reais, vendas a descoberto, alavancagem e derivativos desabilitados.');
+  const modeLabels = {ANALYTICAL_AND_LONG_ONLY_RESEARCH: 'Analítica · Long-Only em pesquisa',
+    ANALYTICAL_ONLY: 'Somente analítica', LONG_ONLY_RESEARCH: 'Long-Only em pesquisa', OBSERVATION_ONLY: 'Somente observação'};
+  byId('quant-rows').replaceChildren(...(quant.items || []).map((item) => cellRow([
+    item.name, item.status, modeLabels[item.mode] || item.mode,
+    (item.requirements || []).join(' · ') + ' · ' + item.restriction
+  ])));
+  const quantReport = quant.latest_report || null;
+  const pairTests = quantReport?.pair_tests || [];
+  set('pair-status', quantReport
+    ? 'Corte ' + (quantReport.as_of || 'indisponível') + ' · ' + pairTests.length + ' pares'
+    : 'Sem relatório point-in-time');
+  byId('pairs-empty').hidden = pairTests.length > 0;
+  byId('pair-rows').replaceChildren(...pairTests.map((pair) => cellRow([
+    pair.symbol_a + ' / ' + pair.symbol_b, pair.status, pair.observations,
+    metric(pair.cointegration_pvalue), metric(pair.fdr_qvalue),
+    metric(pair.dynamic_spread_zscore ?? pair.spread_zscore),
+    metric(pair.half_life_sessions)
+  ])));
+  const correlation = quantReport?.correlation_heatmap || null;
+  const correlationStatus = correlation?.status || 'BLOCKED_NOT_CALCULATED';
+  set('correlation-status', correlationStatus === 'ANALYTICAL_ONLY_RAW_PRICE_RETURNS'
+    ? 'Point-in-time · ' + correlation.observations + ' retornos sincronizados'
+    : correlationStatus);
+  byId('correlation-empty').hidden = correlationStatus === 'ANALYTICAL_ONLY_RAW_PRICE_RETURNS';
+  if (correlationStatus === 'ANALYTICAL_ONLY_RAW_PRICE_RETURNS') {
+    const headingRow = document.createElement('tr');
+    ['Ativo', ...correlation.symbols].forEach((value) => {
+      const cell = document.createElement('th');
+      cell.textContent = value;
+      headingRow.append(cell);
+    });
+    byId('correlation-head').replaceChildren(headingRow);
+    const classes = ['low', 'mid', 'high'];
+    byId('correlation-rows').replaceChildren(...correlation.matrix.map((row, rowIndex) => {
+      const header = document.createElement('th');
+      header.scope = 'row';
+      header.textContent = row.symbol;
+      const cells = row.values.map((value, columnIndex) => {
+        const cell = document.createElement('td');
+        const finite = Number.isFinite(value);
+        cell.textContent = finite ? Number(value).toFixed(2) : '—';
+        cell.classList.add('correlation-cell');
+        if (rowIndex === columnIndex) cell.classList.add('correlation-diagonal');
+        else if (finite) {
+          const band = classes[Math.min(2, Math.floor(Math.abs(value) * 3))];
+          cell.classList.add('correlation-' + (value < 0 ? 'neg-' : 'pos-') + band);
+        }
+        return cell;
+      });
+      const tableRow = document.createElement('tr');
+      tableRow.append(header, ...cells);
+      return tableRow;
+    }));
+  } else {
+    byId('correlation-head').replaceChildren();
+    byId('correlation-rows').replaceChildren();
+  }
+  const quality = quant.quality_snapshot || {};
+  set('quality-status', quality.status === 'PARTIAL_ANALYTICAL_ONLY'
+    ? (quality.items || []).length + ' emissores com margens CVM disponíveis · sem nota total'
+    : 'Fundamentos point-in-time indisponíveis');
+  byId('quality-rows').replaceChildren(...(quality.items || []).map((item) => cellRow([
+    item.symbol + ' · ' + item.sector, pct(item.operating_margin), pct(item.net_margin),
+    item.period_end, dateTime(item.available_at)
+  ])));
   byId('markets').replaceChildren(...data.items.map((row) => {
     const control = document.createElement('button');
     control.type = 'button';
@@ -288,6 +366,7 @@ async function loadPanels(signal) {
       ({DONE: 'Processado', GAP: 'Sessão perdida', WAITING: 'Aguardando dados', RETRY: 'Nova tentativa',
         RUNNING: 'Em processamento', DEAD: 'Requer revisão'}[job.status] ?? job.status)),
     ...(health.jobs ?? []).slice(0,5).map((job) => job.job + ' · ' + job.status + ' · ' + job.detail),
+    ...(health.risk_events ?? []).map((event) => 'Risco · ' + event.strategy_key + ' · ' + event.event_type + ' · ' + dateTime(event.as_of)),
     ...(health.alerts ?? []).map((alert) => alert.code + ' · ' + dateTime(alert.as_of))], 'Aguardando registros de coleta.');
   const events = [
     ...(health.items ?? []).map((row) => ({at: row.last_attempt, origin: row.source, state: row.status,

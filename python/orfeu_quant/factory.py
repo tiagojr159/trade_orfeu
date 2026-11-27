@@ -14,10 +14,10 @@ from pathlib import Path
 
 from .data import utc
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = "ORFEU_FACTORY_REPORT_V1"
 FAMILIES = {"MOMENTUM": (1.0, 1.3, 1.6), "MEAN_REVERSION": (1.5, 2.0, 2.5)}
+SPEC_SCHEMA = "ORFEU_STRATEGY_SPEC_V1"
 
 
 def window(text):
@@ -28,20 +28,63 @@ def window(text):
 
 
 def development_windows(folds, holdout):
-    if len(folds) < 2 or any(left[1] >= right[0] for left, right in zip(folds, folds[1:])):
+    if len(folds) < 2 or any(left[1] >= right[0] for left, right in itertools.pairwise(folds)):
         raise ValueError("DEVELOPMENT_FOLDS_MUST_BE_ORDERED_AND_DISJOINT")
     if folds[-1][1] >= holdout[0]:
         raise ValueError("HOLDOUT_OVERLAPS_DEVELOPMENT")
     return folds
 
 
-def candidates(seed, budget):
+def candidates(seed, budget, spec=None):
     rng = random.Random(seed)
+    if spec is not None:
+        grid = list(itertools.product(*(spec["parameters"][key]
+                                        for key in ("threshold", "atr_stop", "holding"))))
+        rng.shuffle(grid)
+        for threshold, atr, holding in grid[:budget]:
+            yield {"strategy": spec["strategy"], "threshold": threshold,
+                   "atr_stop": atr, "holding": holding}
+        return
     for strategy, thresholds in FAMILIES.items():
         grid = list(itertools.product(thresholds, (2.0, 2.75), (5, 15)))
         rng.shuffle(grid)
         for threshold, atr, holding in grid[:budget]:
             yield {"strategy": strategy, "threshold": threshold, "atr_stop": atr, "holding": holding}
+
+
+def load_spec(path):
+    """Load a bounded JSON strategy specification; expressions and code are not accepted."""
+    try:
+        spec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("INVALID_STRATEGY_SPEC_FILE") from error
+    if (not isinstance(spec, dict)
+            or set(spec) != {"schema", "strategy", "parameters", "folds", "holdout", "seed", "budget"}
+            or spec["schema"] != SPEC_SCHEMA or not isinstance(spec["strategy"], str)
+            or spec["strategy"] not in FAMILIES
+            or not isinstance(spec["parameters"], dict)
+            or set(spec["parameters"]) != {"threshold", "atr_stop", "holding"}):
+        raise ValueError("INVALID_STRATEGY_SPEC_SCHEMA")
+    ranges = {"threshold": (0.5, 4.0), "atr_stop": (1.0, 5.0), "holding": (1, 30)}
+    for key, (minimum, maximum) in ranges.items():
+        values = spec["parameters"][key]
+        if (not isinstance(values, list) or not values or len(values) > 20
+                or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                       or not math.isfinite(value) or value < minimum or value > maximum
+                       or (key == "holding" and not isinstance(value, int)) for value in values)
+                or len(set(values)) != len(values)):
+            raise ValueError("INVALID_STRATEGY_SPEC_PARAMETERS")
+    if (not isinstance(spec["seed"], int) or isinstance(spec["seed"], bool)
+            or not isinstance(spec["budget"], int) or isinstance(spec["budget"], bool)
+            or not 1 <= spec["budget"] <= 12):
+        raise ValueError("INVALID_STRATEGY_SPEC_SEARCH_BUDGET")
+    try:
+        folds = [window("{}:{}".format(*item)) for item in spec["folds"]]
+        holdout = window("{}:{}".format(*spec["holdout"]))
+        development_windows(folds, holdout)
+    except (TypeError, ValueError) as error:
+        raise ValueError("INVALID_STRATEGY_SPEC_WINDOWS") from error
+    return {**spec, "folds": folds, "holdout": holdout}
 
 
 def code_hash():
@@ -59,7 +102,7 @@ def replay(php, params, period, cutoff, cost, timeout):
                f"--as-of={cutoff}", f"--cost-multiplier={cost}"]
     command.extend(f"--{key.replace('_', '-')}={value}" for key, value in params.items())
     try:
-        response = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=timeout)
+        response = subprocess.run(command, check=False, cwd=ROOT, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return {"status": "ERROR", "code": "TRIAL_TIMEOUT"}
     except OSError:
@@ -67,9 +110,9 @@ def replay(php, params, period, cutoff, cost, timeout):
     try:
         result = json.loads(response.stdout if response.returncode == 0 else response.stderr)
         if not isinstance(result, dict):
-            raise ValueError("non-object replay")
+            raise TypeError("non-object replay")
         return result
-    except ValueError:
+    except (TypeError, ValueError):
         return {"status": "ERROR", "code": "INVALID_REPLAY_RESPONSE"}
 
 
@@ -109,7 +152,18 @@ def write_record(stream, item):
 
 
 def search(args):
-    dev = development_windows(args.fold, args.holdout)
+    spec_path = getattr(args, "spec", None)
+    if spec_path is not None:
+        if args.fold or args.holdout is not None:
+            raise ValueError("SPEC_CANNOT_MIX_WITH_WINDOW_ARGUMENTS")
+        spec = load_spec(spec_path)
+        folds, holdout, seed, budget = spec["folds"], spec["holdout"], spec["seed"], spec["budget"]
+    else:
+        if not args.fold or args.holdout is None:
+            raise ValueError("DEVELOPMENT_WINDOWS_REQUIRED")
+        spec = None
+        folds, holdout, seed, budget = args.fold, args.holdout, args.seed, args.budget
+    dev = development_windows(folds, holdout)
     if dev[-1][1] >= utc(args.as_of).date().isoformat():
         raise ValueError("DEVELOPMENT_NOT_COMPLETE")
     args.output.mkdir(parents=True, exist_ok=True)
@@ -117,9 +171,11 @@ def search(args):
     fingerprints = {}
     trials = []
     with (args.output / "trials.jsonl").open("x", encoding="utf-8") as logs:
-        write_record(logs, {"schema": SCHEMA, "development": dev, "holdout_reserved": args.holdout,
-                            "as_of": args.as_of, "seed": args.seed, "code_sha256": code})
-        for params in candidates(args.seed, args.budget):
+        write_record(logs, {"schema": SCHEMA, "development": dev, "holdout_reserved": holdout,
+                            "as_of": args.as_of, "seed": seed, "code_sha256": code,
+                            "strategy_spec_sha256": hashlib.sha256(spec_path.read_bytes()).hexdigest()
+                            if spec_path is not None else None})
+        for params in candidates(seed, budget, spec):
             runs = []
             for period in dev:
                 result = replay(args.php, params, period, args.as_of, 1, args.timeout)
@@ -138,8 +194,8 @@ def search(args):
                     key=lambda trial: trial["score"], reverse=True)
     selected = ranked[0]["candidate"] if ranked and ranked[0]["score"] > 0 and not changed else None
     report = {"schema": SCHEMA, "phase": "DEVELOPMENT", "status": "FROZEN" if selected else "NO_CANDIDATE",
-              "candidate": selected, "as_of": args.as_of, "holdout": args.holdout, "development": dev,
-              "code_sha256": code, "seed": args.seed, "trials": len(trials),
+              "candidate": selected, "as_of": args.as_of, "holdout": holdout, "development": dev,
+              "code_sha256": code, "seed": seed, "trials": len(trials),
               "fold_input_sha256": [{"period": period, "sha256": value} for period, value in fingerprints.items()],
               "reason": "REPLAY_INPUTS_CHANGED" if changed else None,
               "blocked_codes": sorted({run["code"] for trial in trials for run in trial["folds"] if "code" in run}),
@@ -193,8 +249,9 @@ def main():
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
     development = commands.add_parser("search")
-    development.add_argument("--fold", type=window, action="append", required=True)
-    development.add_argument("--holdout", type=window, required=True)
+    development.add_argument("--fold", type=window, action="append")
+    development.add_argument("--holdout", type=window)
+    development.add_argument("--spec", type=Path)
     development.add_argument("--output", type=Path, required=True)
     development.add_argument("--seed", type=int, default=2026)
     development.add_argument("--budget", type=int, choices=range(1, 13), default=4)

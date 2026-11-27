@@ -254,6 +254,7 @@ function exportResearch(Store $store, string $from, string $at): array
                 'instrument'=>['SELECT * FROM orf_instrument ORDER BY id',[]],
                 'symbol'=>['SELECT * FROM orf_symbol_history WHERE available_at<=? ORDER BY instrument_id,valid_from,available_at',[$at]],
                 'eligibility'=>['SELECT * FROM orf_eligibility_history WHERE available_at<=? ORDER BY instrument_id,valid_from,available_at',[$at]],
+                'identity'=>['SELECT * FROM orf_identity_evidence WHERE available_at<=? ORDER BY symbol,valid_from,available_at,id',[$at]],
                 'bar'=>['SELECT * FROM orf_bar WHERE session_date>=? AND available_at<=? ORDER BY session_date,instrument_id,market,id',[$from,$at]],
                 'observation'=>['SELECT * FROM orf_observation WHERE ref_date>=? AND available_at<=? ORDER BY ref_date,id',[$from,$at]],
                 'feature'=>['SELECT * FROM orf_feature_snapshot WHERE as_of>=? AND as_of<=? ORDER BY as_of,instrument_id,feature_hash',[$from,$at]],

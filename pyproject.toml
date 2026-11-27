@@ -10,6 +10,8 @@ dependencies = ["numpy>=2,<3", "scikit-learn>=1.6,<2"]
 
 [project.optional-dependencies]
 challenger = ["lightgbm>=4.6,<5"]
+xgboost = ["xgboost>=3,<4"]
+quant = ["statsmodels>=0.14.4,<1", "scipy>=1.14,<2"]
 test = ["pytest>=8,<10", "ruff>=0.9,<1"]
 
 [tool.setuptools.packages.find]

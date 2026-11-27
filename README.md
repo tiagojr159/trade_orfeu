@@ -30,6 +30,7 @@ O [guia de implantação na HostGator](docs/OPERATIONS.md#hostgator-cpanel) cobr
 ## Documentação
 
 - [Relatório de implementação](docs/IMPLEMENTATION_REPORT.md)
+- [Auditoria e camada Quant Intelligence V3](docs/QUANT_INTELLIGENCE_V3.md)
 - [Operação e instalação](docs/OPERATIONS.md)
 - [Dicionário de dados](docs/DATA_DICTIONARY.md)
 - [Protocolo de pesquisa](docs/RESEARCH_PROTOCOL.md)

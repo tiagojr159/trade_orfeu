@@ -69,6 +69,7 @@ final class ReadApi
                     [$session['open_at'] ?? $at,$at])->fetchColumn()],
             'benchmarks' => ['IBOV' => $ibov ? ['date' => array_key_last($ibov)] + end($ibov) : null,
                 'CDI' => $cdi ? ['date' => array_key_last($cdi)] + end($cdi) : null],
+            'quant_intelligence' => QuantIntelligence::dashboard($this->store,$at,$countBars),
             'sources' => $sources, 'delay_seconds' => $quotes ? max(array_column($quotes,'delay_seconds')) : null,
             'model_version' => $reviews['snapshot']['model_version'] ?? null,
         ];
@@ -122,13 +123,21 @@ final class ReadApi
         switch ($route) {
             case 'dashboard':
                 return $this->dashboard($at);
+            case 'quant/intelligence':
+                $barCount = (int) $db->query('SELECT COUNT(*) FROM orf_bar')->fetchColumn();
+                return QuantIntelligence::dashboard($this->store,$at,$barCount);
             case 'health':
                 $checkpoints = new SessionJobs($this->store);
+                $riskEvents = $db->query("SHOW TABLES LIKE 'orf_risk_event'")->fetchColumn() === 'orf_risk_event'
+                    ? $this->decoded(query($db, 'SELECT r.id,r.account_id,a.strategy_key,r.session_date,r.as_of,
+                        r.event_type,r.severity,r.payload FROM orf_risk_event r JOIN orf_account a ON a.id=r.account_id
+                        WHERE r.as_of<=? ORDER BY r.as_of DESC,r.id DESC LIMIT 30', [$at])->fetchAll()) : [];
                 return ['mode' => 'PAPER_TRADING','as_of' => $at,'data_status' => 'CONNECTED',
                     'items' => $db->query('SELECT * FROM orf_source_health')->fetchAll(),
                     'eod_checkpoints'=>$checkpoints->installed() ? $checkpoints->latest() : [],
                     'jobs' => $db->query('SELECT job,as_of,status,detail FROM orf_job_run ORDER BY id DESC LIMIT 30')->fetchAll(),
-                    'alerts' => $this->decoded($db->query('SELECT as_of,code,payload FROM orf_alert ORDER BY id DESC LIMIT 30')->fetchAll())];
+                    'alerts' => $this->decoded($db->query('SELECT as_of,code,payload FROM orf_alert ORDER BY id DESC LIMIT 30')->fetchAll()),
+                    'risk_events'=>$riskEvents];
             case 'predictions/latest':
                 $rows = query($db, 'SELECT p.id,p.instrument_id,i.symbol,p.as_of,p.target_end,p.horizon,p.model_version,p.payload
                     FROM orf_prediction p JOIN orf_instrument i ON i.id=p.instrument_id
