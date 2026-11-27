@@ -28,6 +28,21 @@ h2 { margin:0; font-size:17px; font-weight:650; }
 .stat small { font-size:11px; }
 .panel { margin-top:17px; scroll-margin-top:15px; }
 .panel-title { display:flex; align-items:center; justify-content:space-between; padding:13px 15px; gap:12px; border-bottom:1px solid var(--line); }
+.process-panel { overflow:hidden; }
+.process-summary { margin:0; padding-top:12px; padding-bottom:12px; border-bottom:1px solid var(--line); color:var(--ink); }
+.flow-scroll { overflow-x:auto; padding:14px; }
+.flow-steps { display:grid; grid-template-columns:repeat(6,minmax(170px,1fr)); gap:18px; min-width:1110px; list-style:none; margin:0; padding:0; }
+.flow-step { position:relative; min-height:158px; padding:13px; border:1px solid var(--line); border-radius:8px; background:#101b22; }
+.flow-step:not(:last-child)::after { content:'›'; position:absolute; top:54px; right:-16px; z-index:1; color:var(--dim); font-size:25px; font-weight:700; }
+.flow-index { display:block; color:var(--gold); font-size:11px; font-weight:750; letter-spacing:.12em; }
+.flow-step h3 { margin:5px 0 9px; font-size:14px; }
+.flow-step strong { display:block; margin-bottom:5px; font-size:12px; }
+.flow-step p { margin:0; color:var(--dim); font-size:12px; line-height:1.4; }
+.flow-step.is-ready { border-color:#3b806e; background:#142923; }
+.flow-step.is-ready strong { color:#8be0c7; }
+.flow-step.is-blocked { border-color:#806542; background:#2a2419; }
+.flow-step.is-blocked strong { color:#f1ce8e; }
+.flow-step.is-neutral strong { color:#c2dfeb; }
 label { color:var(--dim); }
 select, button { font:inherit; color:var(--ink); background:#21343d; border:1px solid #48616b; border-radius:5px; padding:4px 9px; }
 button { cursor:pointer; }

@@ -36,6 +36,20 @@ if (!defined('Orfeu\\ROOT')) {
     <section id="visao">
       <div class="intro"><div><p class="eyebrow">INTELIGÊNCIA DE MERCADO</p><h1>Visão geral</h1></div><p id="as-of" class="muted"></p></div>
       <p id="notice" class="notice" role="status">Consultando o banco local.</p>
+      <section class="panel process-panel" aria-labelledby="process-title">
+        <div class="panel-title"><h2 id="process-title">Como o ORFEU funciona</h2><span class="muted">Fluxo da análise até a simulação</span></div>
+        <p id="process-summary" class="details process-summary" role="status">Consultando os dados para mostrar em qual etapa o sistema está.</p>
+        <div class="flow-scroll">
+          <ol class="flow-steps" aria-label="Etapas do ORFEU">
+            <li class="flow-step is-neutral" id="flow-node-data"><span class="flow-index">01</span><h3>Dados de mercado</h3><strong id="flow-state-data">Aguardando</strong><p id="flow-info-data">Histórico diário oficial</p></li>
+            <li class="flow-step is-neutral" id="flow-node-identity"><span class="flow-index">02</span><h3>Cadastro conferido</h3><strong id="flow-state-identity">Aguardando</strong><p id="flow-info-identity">Ticker, ativo e identidade</p></li>
+            <li class="flow-step is-neutral" id="flow-node-analysis"><span class="flow-index">03</span><h3>Análise quantitativa</h3><strong id="flow-state-analysis">Aguardando</strong><p id="flow-info-analysis">Compara estratégias e busca sinais</p></li>
+            <li class="flow-step is-neutral" id="flow-node-risk"><span class="flow-index">04</span><h3>Filtro de risco</h3><strong id="flow-state-risk">Aguardando</strong><p id="flow-info-risk">Long-only, limites e saldo disponível</p></li>
+            <li class="flow-step is-neutral" id="flow-node-orders"><span class="flow-index">05</span><h3>Ordem virtual</h3><strong id="flow-state-orders">Aguardando</strong><p id="flow-info-orders">PAPER trading; sem corretora</p></li>
+            <li class="flow-step is-neutral" id="flow-node-result"><span class="flow-index">06</span><h3>Resultado</h3><strong id="flow-state-result">Aguardando</strong><p id="flow-info-result">Lucro e patrimônio das contas</p></li>
+          </ol>
+        </div>
+      </section>
       <div class="stats">
         <div class="stat"><span>Patrimônio virtual</span><strong id="equity">—</strong><small id="capital">Capital inicial · —</small></div>
         <div class="stat"><span>Resultado acumulado</span><strong id="pnl">—</strong><small id="return">Retorno · —</small></div>

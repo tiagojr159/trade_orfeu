@@ -12,6 +12,7 @@ const dateTime = (value) => value ? time.format(new Date(value.replace(' ', 'T')
 const set = (id, value) => { byId(id).textContent = value; };
 let tradeRows = [];
 let curve = [];
+let dashboardData = null;
 const titles = {
   ORFEU_AI: 'Ensemble preditivo', MULTIHORIZON: 'Consenso de horizontes', MOMENTUM: 'Tendência EMA',
   RELATIVE_STRENGTH: 'Força transversal', MEAN_REVERSION: 'Reversão à média', BREAKOUT: 'Donchian e volume',
@@ -51,6 +52,64 @@ function lines(id, values, fallback) {
     list.append(item);
   }
   target.replaceChildren(list);
+}
+
+function flowNode(key, status, detail, tone) {
+  const node = byId('flow-node-' + key);
+  node.className = 'flow-step is-' + tone;
+  set('flow-state-' + key, status);
+  set('flow-info-' + key, detail);
+}
+
+function renderSystemFlow(data, matrix = [], orders = [], trades = []) {
+  if (!data) return;
+  const summary = data.summary || {};
+  const quant = data.quant_intelligence || {};
+  const report = quant.latest_report || {};
+  const items = data.items || [];
+  const eodBars = Number(summary.eod_bars || 0);
+  const verified = Number(report.identity_evidence_count || 0);
+  const totalSymbols = items.length || 10;
+  const quoteCount = items.filter((item) => item.quote).length;
+  const analysisReady = quant.market_results_status === 'RESEARCH_ONLY';
+  const pnl = Number(summary.equity_cents || 0) - Number(summary.initial_cents || 0);
+
+  flowNode('data', eodBars > 0 ? 'Histórico recebido' : 'Bloqueado',
+    eodBars > 0 ? eodBars + ' barras oficiais; cotações também são exibidas.'
+      : '0 barras oficiais. ' + quoteCount + ' cotações observadas não substituem histórico.',
+    eodBars > 0 ? 'ready' : 'blocked');
+  flowNode('identity', verified >= totalSymbols ? 'Conferido' : verified + '/' + totalSymbols + ' conferidos',
+    verified >= totalSymbols ? 'Cadastro validado para o universo.'
+      : 'O motor só usa ativos com evidência de identidade e ticker.',
+    verified >= totalSymbols ? 'ready' : 'blocked');
+  flowNode('analysis', analysisReady ? 'Relatório disponível' : 'Aguardando dados',
+    analysisReady ? 'Calcula estratégias e pesquisa sinais; resultado é analítico.'
+      : 'Sem dados completos, não calcula sinais quantitativos.',
+    analysisReady ? 'ready' : 'blocked');
+  flowNode('risk', 'Proteções ligadas',
+    'Só compras virtuais com limites de risco e saldo; sem alavancagem.', 'ready');
+  flowNode('orders', orders.length ? orders.length + ' ordens' : 'Nenhuma ordem',
+    orders.length ? trades.length + ' execuções registradas; nenhuma vai para corretora.'
+      : matrix.length ? 'Há decisões, mas nenhuma ordem virtual foi registrada.'
+        : 'Sem decisão aprovada, não há ordem virtual; nunca envia à corretora.',
+    orders.length ? 'ready' : 'neutral');
+  flowNode('result', amount(pnl) + ' acumulados',
+    amount(summary.equity_cents) + ' de patrimônio contra ' + amount(summary.initial_cents) + ' iniciais.',
+    'neutral');
+
+  let explanation;
+  if (eodBars === 0) {
+    explanation = 'Agora: o fluxo para na entrada de dados. Sem barras oficiais, o ORFEU não valida sinais nem cria ordens. O lucro simulado ainda não foi medido.';
+  } else if (verified < totalSymbols) {
+    explanation = 'Agora: há histórico, mas faltam identidades verificadas para ' + (totalSymbols - verified) + ' ativos. O sistema bloqueia a análise desses papéis.';
+  } else if (!matrix.length) {
+    explanation = 'Agora: dados e cadastros estão disponíveis, mas não há decisões registradas. O ORFEU não precisa comprar todos os dias.';
+  } else if (!orders.length) {
+    explanation = 'Agora: existem decisões na matriz, mas nenhuma virou ordem virtual após os filtros de risco.';
+  } else {
+    explanation = 'Agora: ' + matrix.length + ' decisões, ' + orders.length + ' ordens virtuais e resultado acumulado de ' + amount(pnl) + '. Isso não é envio a uma corretora.';
+  }
+  set('process-summary', explanation);
 }
 
 async function showInstrument(id) {
@@ -155,6 +214,7 @@ async function updateCurve() {
 }
 
 function render(data) {
+  dashboardData = data;
   const s = data.summary;
   const delta = s.equity_cents == null || s.initial_cents == null ? null : s.equity_cents - s.initial_cents;
   set('market-status', { CLOSED: 'Pregão fechado', CONTINUOUS: 'Pregão contínuo' }[data.market_status] || 'Calendário indisponível');
@@ -382,6 +442,7 @@ async function loadPanels(signal) {
     dateTime(event.at), event.origin || 'Sistema', event.state || '—', event.detail || '—'
   ])));
   byId('logs-empty').hidden = events.length > 0;
+  renderSystemFlow(dashboardData, matrix, orders, tradeRows);
 }
 
 let dashboardInstruments = [];
